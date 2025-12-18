@@ -6,7 +6,7 @@ mod proxy;  // 反代服务模块
 pub mod error;
 
 use tauri::Manager;
-use modules::logger;
+use modules::{logger, HttpClientFactory};
 
 // 测试命令
 #[tauri::command]
@@ -33,11 +33,24 @@ pub fn run() {
                 });
         }))
         .manage(commands::proxy::ProxyServiceState::new())
+        .manage(HttpClientFactory::new())  // 注册 HTTP 客户端工厂
         .setup(|app| {
             println!("Setup starting...");
             modules::tray::create_tray(app.handle())?;
             println!("Tray created");
-            
+
+            // 初始化网络代理配置
+            if let Ok(config) = modules::config::load_app_config() {
+                let factory = app.state::<HttpClientFactory>();
+                if config.network_proxy.enabled {
+                    if let Err(e) = factory.update_proxy(Some(config.network_proxy.clone())) {
+                        eprintln!("初始化网络代理失败: {}", e);
+                    } else {
+                        println!("网络代理已启用: {}:{}", config.network_proxy.host, config.network_proxy.port);
+                    }
+                }
+            }
+
             // 自动启动反代服务
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -105,6 +118,10 @@ pub fn run() {
             commands::proxy::get_proxy_stats,
             commands::proxy::generate_api_key,
             commands::proxy::reload_proxy_accounts,
+            // 网络代理命令
+            commands::network_proxy::save_proxy_settings,
+            commands::network_proxy::get_proxy_settings,
+            commands::network_proxy::test_proxy_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

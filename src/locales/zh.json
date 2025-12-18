@@ -3,6 +3,7 @@
         "loading": "加载中...",
         "save": "保存",
         "saved": "保存成功",
+        "saving": "保存中...",
         "cancel": "取消",
         "confirm": "确认",
         "delete": "删除",
@@ -18,6 +19,7 @@
         "info": "提示",
         "details": "详情",
         "clear": "清除",
+        "optional": "可选",
         "prev_page": "上一页",
         "next_page": "下一页",
         "pagination_info": "显示第 {{start}} 到 {{end}} 条，共 {{total}} 条"
@@ -184,12 +186,23 @@
             "open_btn": "打开",
             "data_dir": "数据目录",
             "data_dir_desc": "账号数据和配置文件的存储位置",
+            "proxy_title": "网络代理",
             "logs_title": "日志维护",
             "logs_desc": "清理应用产生的日志缓存文件，不会影响账号数据。",
             "clear_logs": "清理日志缓存",
             "clear_logs_title": "清理日志确认",
             "clear_logs_msg": "确定要清理所有日志缓存文件吗？",
-            "logs_cleared": "日志缓存已清理"
+            "logs_cleared": "日志缓存已清理",
+            "proxy": {
+                "enable": "启用网络代理",
+                "type": "代理类型",
+                "host": "服务器地址",
+                "port": "端口",
+                "username": "用户名",
+                "password": "密码",
+                "test": "测试连接",
+                "testing": "测试中..."
+            }
         },
         "about": {
             "title": "关于",

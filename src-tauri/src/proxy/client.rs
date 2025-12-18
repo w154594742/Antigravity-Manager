@@ -164,9 +164,6 @@ impl GeminiClient {
         // 这是个复杂逻辑。
         // 为了不把 client.rs 搞得太乱，建议把 "Gemini Stream -> Anthropic Stream" 的转换逻辑放到 converter.rs 或新的 proxy/anthropic.rs 中？
         // 这里仅负责发起请求，拿到 Gemini 的 ByteStream，然后 map 转换。
-        
-        let msg_id = format!("msg_{}", Uuid::new_v4());
-        let created_model = model_name.clone();
 
         let stream = response.bytes_stream()
             .eventsource()

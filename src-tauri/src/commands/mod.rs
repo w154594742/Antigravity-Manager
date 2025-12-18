@@ -4,6 +4,8 @@ use tauri::Emitter;
 
 // 导出 proxy 命令
 pub mod proxy;
+// 导出网络代理命令
+pub mod network_proxy;
 
 /// 列出所有账号
 #[tauri::command]
@@ -83,12 +85,16 @@ pub async fn get_current_account() -> Result<Option<Account>, String> {
 
 /// 查询账号配额
 #[tauri::command]
-pub async fn fetch_account_quota(app: tauri::AppHandle, account_id: String) -> crate::error::AppResult<QuotaData> {
+pub async fn fetch_account_quota(
+    app: tauri::AppHandle,
+    account_id: String,
+    factory: tauri::State<'_, crate::modules::HttpClientFactory>,
+) -> crate::error::AppResult<QuotaData> {
     modules::logger::log_info(&format!("手动刷新配额请求: {}", account_id));
     let mut account = modules::load_account(&account_id).map_err(crate::error::AppError::Account)?;
-    
+
     // 使用带重试的查询 (Shared logic)
-    let quota = modules::account::fetch_quota_with_retry(&mut account).await?;
+    let quota = modules::account::fetch_quota_with_retry(&mut account, &factory).await?;
     
     // 4. 更新账号配额
     modules::update_account_quota(&account_id, quota.clone()).map_err(crate::error::AppError::Account)?;
@@ -108,7 +114,9 @@ pub struct RefreshStats {
 
 /// 刷新所有账号配额
 #[tauri::command]
-pub async fn refresh_all_quotas() -> Result<RefreshStats, String> {
+pub async fn refresh_all_quotas(
+    factory: tauri::State<'_, crate::modules::HttpClientFactory>,
+) -> Result<RefreshStats, String> {
     modules::logger::log_info("开始批量刷新所有账号配额");
     let accounts = modules::list_accounts()?;
     
@@ -127,7 +135,7 @@ pub async fn refresh_all_quotas() -> Result<RefreshStats, String> {
         
         modules::logger::log_info(&format!("  - Processing {}", account.email));
         
-        match modules::account::fetch_quota_with_retry(&mut account).await {
+        match modules::account::fetch_quota_with_retry(&mut account, &factory).await {
             Ok(quota) => {
                  // 保存配额
                  if let Err(e) = modules::update_account_quota(&account.id, quota) {

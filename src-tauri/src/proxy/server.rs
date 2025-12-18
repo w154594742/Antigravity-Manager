@@ -638,8 +638,6 @@ async fn anthropic_messages_handler(
                     // Setup header for SSE
                     let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
                     let token_clone = token.clone();
-                    let request_clone = Arc::clone(&request);
-                    let mut total_content_length = 0;
                     let mut total_content = String::new(); // 收集完整内容用于日志
                     let model_name = request.model.clone();
                     
@@ -682,9 +680,8 @@ async fn anthropic_messages_handler(
                                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&chunk_str) {
                                         let delta_content = json["choices"][0]["delta"]["content"].as_str().unwrap_or("");
                                         let finish_reason = json["choices"][0]["finish_reason"].as_str();
-                                        
+
                                         if !delta_content.is_empty() {
-                                            total_content_length += delta_content.len();
                                             total_content.push_str(delta_content);
                                             let delta_json = serde_json::json!({
                                                 "type": "content_block_delta",

@@ -2,6 +2,7 @@ use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use crate::models::QuotaData;
+use super::http_client::HttpClientFactory;
 
 const QUOTA_API_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 const LOAD_PROJECT_API_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
@@ -32,17 +33,17 @@ struct LoadProjectResponse {
     project_id: Option<String>,
 }
 
-/// 创建配置好的 HTTP Client
-fn create_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .unwrap_or_default()
-}
-
 /// 获取 Project ID
-async fn fetch_project_id(access_token: &str) -> Option<String> {
-    let client = create_client();
+async fn fetch_project_id(access_token: &str, factory: &HttpClientFactory) -> Option<String> {
+    // 使用工厂构建客户端（自动应用代理配置）
+    let client = match factory.build_client() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("构建 HTTP 客户端失败: {}", e);
+            return None;
+        }
+    };
+
     let body = json!({
         "metadata": {
             "ideType": "ANTIGRAVITY"
@@ -75,13 +76,16 @@ async fn fetch_project_id(access_token: &str) -> Option<String> {
 }
 
 /// 查询账号配额
-pub async fn fetch_quota(access_token: &str) -> crate::error::AppResult<QuotaData> {
+pub async fn fetch_quota(access_token: &str, factory: &HttpClientFactory) -> crate::error::AppResult<QuotaData> {
     use crate::error::AppError;
     crate::modules::logger::log_info("开始外部查询配额...");
-    let client = create_client();
-    
+
+    // 使用工厂构建客户端（自动应用代理配置）
+    let client = factory.build_client()
+        .map_err(|e| AppError::Unknown(format!("构建 HTTP 客户端失败: {}", e)))?;
+
     // 1. 获取 Project ID
-    let project_id = fetch_project_id(access_token).await;
+    let project_id = fetch_project_id(access_token, factory).await;
     crate::modules::logger::log_info(&format!("Project ID 获取结果: {:?}", project_id));
     
     // 2. 构建请求体
@@ -172,13 +176,16 @@ pub async fn fetch_quota(access_token: &str) -> crate::error::AppResult<QuotaDat
 
 /// 批量查询所有账号配额 (备用功能)
 #[allow(dead_code)]
-pub async fn fetch_all_quotas(accounts: Vec<(String, String)>) -> Vec<(String, crate::error::AppResult<QuotaData>)> {
+pub async fn fetch_all_quotas(
+    accounts: Vec<(String, String)>,
+    factory: &HttpClientFactory,
+) -> Vec<(String, crate::error::AppResult<QuotaData>)> {
     let mut results = Vec::new();
-    
+
     for (account_id, access_token) in accounts {
-        let result = fetch_quota(&access_token).await;
+        let result = fetch_quota(&access_token, factory).await;
         results.push((account_id, result));
     }
-    
+
     results
 }

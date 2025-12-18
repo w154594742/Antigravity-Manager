@@ -321,7 +321,7 @@ pub fn export_accounts() -> Result<Vec<(String, String)>, String> {
 }
 
 /// 带有重试机制的配额查询 (从 commands 移动到 modules 以便共享)
-pub async fn fetch_quota_with_retry(account: &mut Account) -> crate::error::AppResult<QuotaData> {
+pub async fn fetch_quota_with_retry(account: &mut Account, factory: &crate::modules::HttpClientFactory) -> crate::error::AppResult<QuotaData> {
     use crate::modules::oauth;
     use crate::error::AppError;
     use reqwest::StatusCode;
@@ -368,7 +368,7 @@ pub async fn fetch_quota_with_retry(account: &mut Account) -> crate::error::AppR
     }
 
     // 2. 尝试查询
-    let result = modules::fetch_quota(&account.token.access_token).await;
+    let result = modules::fetch_quota(&account.token.access_token, factory).await;
     
     // 3. 处理 401 错误 (Handle 401)
     if let Err(AppError::Network(ref e)) = result {
@@ -405,7 +405,7 @@ pub async fn fetch_quota_with_retry(account: &mut Account) -> crate::error::AppR
                 upsert_account(account.email.clone(), name, new_token.clone()).map_err(AppError::Account)?;
                 
                 // 重试查询
-                let retry_result = modules::fetch_quota(&new_token.access_token).await;
+                let retry_result = modules::fetch_quota(&new_token.access_token, factory).await;
                 
                 if let Err(AppError::Network(ref e)) = retry_result {
                     if let Some(s) = e.status() {

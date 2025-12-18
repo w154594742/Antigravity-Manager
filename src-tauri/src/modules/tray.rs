@@ -76,11 +76,14 @@ pub fn create_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
                         if let Ok(Some(account_id)) = modules::get_current_account_id() {
                              // 通知前端开始
                              let _ = app_handle.emit("tray://refresh-current", ());
-                             
+
+                             // 获取 HTTP 客户端工厂
+                             let factory = app_handle.state::<crate::modules::HttpClientFactory>();
+
                              // 执行刷新逻辑
                              if let Ok(mut account) = modules::load_account(&account_id) {
                                  // 使用 modules::account 中的共享逻辑
-                                 match modules::account::fetch_quota_with_retry(&mut account).await {
+                                 match modules::account::fetch_quota_with_retry(&mut account, &factory).await {
                                      Ok(quota) => {
                                          // 保存
                                          let _ = modules::update_account_quota(&account.id, quota);

@@ -6,6 +6,7 @@ import { useConfigStore } from '../stores/useConfigStore';
 import { AppConfig } from '../types/config';
 import ModalDialog from '../components/common/ModalDialog';
 import { showToast } from '../components/common/ToastContainer';
+import ProxySettings from '../components/settings/ProxySettings';
 
 import { useTranslation } from 'react-i18next';
 
@@ -336,6 +337,14 @@ function Settings() {
                                     </button>
                                 </div>
                                 <p className="text-sm text-gray-500 dark:text-gray-400 mt-2">{t('settings.advanced.data_dir_desc')}</p>
+                            </div>
+
+                            {/* 网络代理设置 */}
+                            <div className="border-t border-gray-200 dark:border-base-200 pt-6 mt-6">
+                                <h3 className="text-lg font-semibold text-gray-900 dark:text-base-content mb-4">
+                                    {t('settings.advanced.proxy_title', '网络代理')}
+                                </h3>
+                                <ProxySettings />
                             </div>
 
                             <div className="border-t border-gray-200 dark:border-base-200 pt-4">
