@@ -4,19 +4,16 @@ use axum::{
     body::Body,
     extract::{Json, State},
     http::{header, StatusCode},
-    response::{IntoResponse, Response, Sse},
+    response::{IntoResponse, Response},
 };
 use bytes::Bytes;
 use futures::StreamExt;
 use serde_json::{json, Value};
-use std::sync::Arc;
 use tracing::{debug, error};
 
 use crate::proxy::mappers::claude::{
     transform_claude_request_in, transform_response, create_claude_sse_stream, ClaudeRequest,
 };
-use crate::proxy::upstream::client::UpstreamClient;
-use crate::proxy::token_manager::TokenManager;
 use crate::proxy::server::AppState;
 
 const MAX_RETRY_ATTEMPTS: usize = 3;
@@ -28,7 +25,7 @@ pub async fn handle_messages(
     State(state): State<AppState>,
     Json(request): Json<ClaudeRequest>,
 ) -> Response {
-    tracing::info!("Received Claude request for model: {}", request.model);
+    crate::modules::logger::log_info(&format!("Received Claude request for model: {}", request.model));
 
     // 1. 获取 UpstreamClient
     let upstream = state.upstream.clone();
@@ -38,21 +35,9 @@ pub async fn handle_messages(
     let request_for_body = request.clone();
     let token_manager = state.token_manager;
     
-    // 确定方法和查询字符串
-    let method = if request.stream {
-        "streamGenerateContent"
-    } else {
-        "generateContent"
-    };
-    let query_string = if request.stream { Some("alt=sse") } else { None };
-
     let pool_size = token_manager.len();
     let max_attempts = MAX_RETRY_ATTEMPTS.min(pool_size).max(1);
 
-    // 准备闭包：获取凭证
-    // 注意：这个闭包不能是异步的，所以我们需要在外层准备好 token
-    // 实际上，我们应该在外层循环中处理重试
-    
     // 简化方案：直接在这里处理重试逻辑
     let mut last_error = String::new();
     

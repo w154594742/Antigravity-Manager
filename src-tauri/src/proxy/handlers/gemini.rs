@@ -22,7 +22,7 @@ pub async fn handle_generate(
         (model_action, "generateContent".to_string())
     };
 
-    debug!("Received Gemini request: {}/{}", model_name, method);
+    crate::modules::logger::log_info(&format!("Received Gemini request: {}/{}", model_name, method));
 
     // 1. 验证方法
     if method != "generateContent" && method != "streamGenerateContent" {

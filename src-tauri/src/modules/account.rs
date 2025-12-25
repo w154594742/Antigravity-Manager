@@ -315,7 +315,7 @@ pub fn delete_accounts(account_ids: &[String]) -> Result<(), String> {
 pub async fn switch_account(account_id: &str) -> Result<(), String> {
     use crate::modules::{oauth, process, db};
     
-    let mut index = {
+    let index = {
         let _lock = ACCOUNT_INDEX_LOCK.lock().map_err(|e| format!("获取锁失败: {}", e))?;
         load_account_index()?
     };
@@ -350,7 +350,7 @@ pub async fn switch_account(account_id: &str) -> Result<(), String> {
         fs::copy(&db_path, &backup_path)
             .map_err(|e| format!("备份数据库失败: {}", e))?;
     } else {
-        println!("数据库不存在，跳过备份");
+        crate::modules::logger::log_info("数据库不存在，跳过备份");
     }
     
     // 5. 注入 Token

@@ -162,7 +162,8 @@ fn build_contents(
 ) -> Result<Value, String> {
     let mut contents = Vec::new();
 
-    for msg in messages {
+    let msg_count = messages.len();
+    for (i, msg) in messages.iter().enumerate() {
         let role = if msg.role == "assistant" {
             "model"
         } else {
@@ -171,32 +172,11 @@ fn build_contents(
 
         let mut parts = Vec::new();
 
-        // Regex to extract <thought>...</thought> from strings
-        static THOUGHT_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-            regex::Regex::new(r"(?s)<thought>(.*?)</thought>").unwrap()
-        });
-
         match &msg.content {
             MessageContent::String(text) => {
                 if text != "(no content)" {
-                    let mut actual_text = text.as_str();
-                    
-                    // Try to extract thought from <thought> tags
-                    if let Some(caps) = THOUGHT_RE.captures(text) {
-                        let thought_content = caps.get(1).map_or("", |m| m.as_str());
-                        parts.push(json!({
-                            "text": thought_content,
-                            "thought": true
-                        }));
-                        // Remove thoughts from text for the next part
-                        // (Simple implementation: just take what's after </thought> or keep as is if complex)
-                        if let Some(end_tag_pos) = text.find("</thought>") {
-                            actual_text = &text[end_tag_pos + 10..];
-                        }
-                    }
-                    
-                    if !actual_text.trim().is_empty() {
-                        parts.push(json!({"text": actual_text.trim()}));
+                    if !text.trim().is_empty() {
+                        parts.push(json!({"text": text.trim()}));
                     }
                 }
             }
@@ -266,7 +246,9 @@ fn build_contents(
         }
 
         // Fix for "Thinking enabled, assistant message must start with thinking block" 400 error
-        if role == "model" && is_thinking_enabled {
+        // ONLY apply this for the LAST assistant message (Pre-fill scenario)
+        // Historical assistant messages MUST NOT have dummy thinking blocks without signatures
+        if role == "model" && is_thinking_enabled && i == msg_count - 1 {
             let has_thought_part = parts.iter().any(|p| {
                 p.get("thought").and_then(|v| v.as_bool()).unwrap_or(false)
             });

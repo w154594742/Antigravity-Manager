@@ -367,17 +367,19 @@ function AddAccountDialog({ onAdd }: AddAccountDialogProps) {
                                             {t('accounts.add.import.scheme_a_desc')}
                                         </p>
                                         <button
-                                            className="btn btn-outline w-full border-gray-300 dark:border-base-300 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-base-200 hover:border-gray-400 hover:text-gray-900 dark:hover:text-white"
+                                            className="w-full px-4 py-3 bg-gray-50 dark:bg-base-200 text-gray-700 dark:text-gray-300 font-medium rounded-xl border border-gray-200 dark:border-base-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 hover:border-blue-200 dark:hover:border-blue-800 hover:text-blue-600 dark:hover:text-blue-400 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed mb-2 shadow-sm"
                                             onClick={handleImportDb}
                                             disabled={status === 'loading' || status === 'success'}
                                         >
+                                            <CheckCircle2 className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity" />
                                             {t('accounts.add.import.btn_db')}
                                         </button>
                                         <button
-                                            className="btn btn-outline w-full border-gray-300 dark:border-base-300 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-base-200 hover:border-gray-400 hover:text-gray-900 dark:hover:text-white mt-2"
+                                            className="w-full px-4 py-3 bg-gray-50 dark:bg-base-200 text-gray-700 dark:text-gray-300 font-medium rounded-xl border border-gray-200 dark:border-base-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 hover:border-indigo-200 dark:hover:border-indigo-800 hover:text-indigo-600 dark:hover:text-indigo-400 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
                                             onClick={handleImportCustomDb}
                                             disabled={status === 'loading' || status === 'success'}
                                         >
+                                            <Database className="w-4 h-4" />
                                             {t('accounts.add.import.btn_custom_db') || 'Custom DB (state.vscdb)'}
                                         </button>
                                     </div>
@@ -393,10 +395,11 @@ function AddAccountDialog({ onAdd }: AddAccountDialogProps) {
                                             {t('accounts.add.import.scheme_b_desc')}
                                         </p>
                                         <button
-                                            className="btn btn-outline w-full border-gray-300 dark:border-base-300 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-base-200 hover:border-gray-400 hover:text-gray-900 dark:hover:text-white"
+                                            className="w-full px-4 py-3 bg-gray-50 dark:bg-base-200 text-gray-700 dark:text-gray-300 font-medium rounded-xl border border-gray-200 dark:border-base-300 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 hover:border-emerald-200 dark:hover:border-emerald-800 hover:text-emerald-600 dark:hover:text-emerald-400 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
                                             onClick={handleImportV1}
                                             disabled={status === 'loading' || status === 'success'}
                                         >
+                                            <FileClock className="w-4 h-4" />
                                             {t('accounts.add.import.btn_v1')}
                                         </button>
                                     </div>

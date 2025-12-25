@@ -126,7 +126,7 @@ fn get_antigravity_pids() -> Vec<u32> {
     
     for (pid, process) in system.processes() {
         let pid_u32 = pid.as_u32();
-        let name = process.name().to_string_lossy().to_lowercase();
+        let _name = process.name().to_string_lossy().to_lowercase();
         
         #[cfg(target_os = "linux")]
         {

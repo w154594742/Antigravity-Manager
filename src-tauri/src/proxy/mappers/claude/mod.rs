@@ -10,8 +10,7 @@ pub mod utils;
 pub use models::*;
 pub use request::transform_claude_request_in;
 pub use response::transform_response;
-pub use streaming::{StreamingState, PartProcessor, BlockType, SignatureManager};
-pub use utils::*;
+pub use streaming::{StreamingState, PartProcessor};
 
 use bytes::Bytes;
 use futures::Stream;

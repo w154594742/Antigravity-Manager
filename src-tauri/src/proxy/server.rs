@@ -1,14 +1,14 @@
 use axum::{
     Router,
     routing::{get, post},
-    extract::{State, DefaultBodyLimit},
-    response::{IntoResponse, Response, sse::{Event, Sse}},
-    http::StatusCode,
-    Json,
+    extract::DefaultBodyLimit,
+    response::{IntoResponse, Response, Json},
 };
+use tower_http::trace::TraceLayer;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use crate::proxy::TokenManager;
+
 
 /// Axum 应用状态
 #[derive(Clone)]
@@ -62,7 +62,7 @@ impl AxumServer {
         anthropic_mapping: std::collections::HashMap<String, String>,
         openai_mapping: std::collections::HashMap<String, String>,
         custom_mapping: std::collections::HashMap<String, String>,
-        request_timeout: u64,
+        _request_timeout: u64,
         upstream_proxy: crate::proxy::config::UpstreamProxyConfig,
     ) -> Result<(Self, tokio::task::JoinHandle<()>), String> {
         let mapping_state = Arc::new(tokio::sync::RwLock::new(anthropic_mapping));
@@ -101,6 +101,7 @@ impl AxumServer {
             .route("/v1beta/models/:model/countTokens", post(handlers::gemini::handle_count_tokens)) // Specific route priority
             .route("/healthz", get(health_check_handler))
             .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
+            .layer(TraceLayer::new_for_http())
             .layer(axum::middleware::from_fn(crate::proxy::middleware::auth_middleware))
             .layer(crate::proxy::middleware::cors_layer())
             .with_state(state);

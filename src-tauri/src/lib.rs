@@ -7,6 +7,7 @@ pub mod error;
 
 use tauri::Manager;
 use modules::logger;
+use tracing::{info, error};
 
 // 测试命令
 #[tauri::command]
@@ -34,9 +35,9 @@ pub fn run() {
         }))
         .manage(commands::proxy::ProxyServiceState::new())
         .setup(|app| {
-            println!("Setup starting...");
+            info!("Setup starting...");
             modules::tray::create_tray(app.handle())?;
-            println!("Tray created");
+            info!("Tray created");
             
             // 自动启动反代服务
             let handle = app.handle().clone();
@@ -51,9 +52,9 @@ pub fn run() {
                             state,
                             handle.clone(),
                         ).await {
-                            eprintln!("自动启动反代服务失败: {}", e);
+                            error!("自动启动反代服务失败: {}", e);
                         } else {
-                            println!("反代服务自动启动成功");
+                            info!("反代服务自动启动成功");
                         }
                     }
                 }

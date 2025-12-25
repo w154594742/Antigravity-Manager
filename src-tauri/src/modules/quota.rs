@@ -59,7 +59,9 @@ async fn fetch_project_id(access_token: &str) -> Option<String> {
             Ok(res) => {
                 if res.status().is_success() {
                     if let Ok(data) = res.json::<LoadProjectResponse>().await {
-                        return data.project_id;
+                        if let Some(pid) = data.project_id {
+                            return Some(pid);
+                        }
                     }
                 }
             }
@@ -68,7 +70,11 @@ async fn fetch_project_id(access_token: &str) -> Option<String> {
             }
         }
     }
-    None
+
+    // 如果获取失败，使用内置的随机生成逻辑作为兜底
+    let mock_id = crate::proxy::project_resolver::generate_mock_project_id();
+    crate::modules::logger::log_warn(&format!("账号无资格获取官方 cloudaicompanionProject，配额查询将使用随机生成的 Project ID 作为兜底: {}", mock_id));
+    Some(mock_id)
 }
 
 /// 查询账号配额
