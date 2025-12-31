@@ -160,6 +160,15 @@ print(response.choices[0].message.content)
 ## 📝 Developer & Community
 
     *   **v3.3.8 (2025-12-31)**:
+        - **Proxy Monitor Module (Core Thanks to @84hero PR #212)**:
+            - **Real-time Request Tracking**: Brand-new monitoring dashboard for real-time visualization of all proxy traffic, including request paths, status codes, response times, token consumption, and more.
+            - **Persistent Log Storage**: SQLite-based logging system supporting historical record queries and analysis across application restarts.
+            - **Advanced Filtering & Sorting**: Real-time search, timestamp-based sorting for quick problem request identification.
+            - **Detailed Inspection Modal**: Click any request to view full request/response payloads, headers, token counts, and other debugging info.
+            - **Performance Optimization**: Compact data formatting (e.g., 1.2k instead of 1200) improves UI responsiveness with large datasets.
+        - **UI Optimization & Layout Improvements**:
+            - **Toggle Style Unification**: Standardized all toggle switches (Auto Start, LAN Access, Auth, External Providers) to small blue style for consistent visuals.
+            - **Layout Density Optimization**: Merged "Allow LAN Access" and "Auth" into a single-row grid layout (lg:grid-cols-2) for more efficient use of space on large screens.
         - **Zai Dispatcher Integration (Core Thanks to @XinXin622 PR #205)**:
             - **Multi-level Dispatching**: Supports `Exclusive`, `Pooled`, and `Fallback` modes to balance response speed and account security.
             - **Built-in MCP Support**: Preconfigured endpoints for Web Search Prime, Web Reader, and Vision MCP servers.
