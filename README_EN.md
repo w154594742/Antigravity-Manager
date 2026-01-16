@@ -188,7 +188,7 @@ print(response.choices[0].message.content)
 
 *   **Changelog**:
     *   **v3.3.34 (2026-01-16)**:
-        - **OpenAI Codex/Responses Protocol Fix (Fix Issue #742 - Thanks @Enk11dou)**:
+        - **OpenAI Codex/Responses Protocol Fix (Fix Issue #742)**:
             - **400 Invalid Argument Complete Fix**:
                 - **Root Cause**: The `/v1/responses` and other proprietary endpoints caused Gemini to receive empty bodies when the request body contained only `instructions` or `input` but lacked the `messages` field, as the transformation logic didn't cover all scenarios.
                 - **Fix Details**: Backported the "request normalization" logic from the Chat interface to `handle_completions`. The system now forcibly detects Codex-specific fields (`instructions`/`input`), and even if `messages` is empty or missing, automatically transforms them into standard System/User message pairs, ensuring legal upstream requests.
@@ -198,14 +198,14 @@ print(response.choices[0].message.content)
             - **Session Stickiness Support**:
                 - **Feature Expansion**:completed the `session_id` extraction and scheduling logic under the OpenAI protocol. Now, whether it's Chat or Codex interface, as long as it's the same conversation, the system will try its best to schedule it to the same Google account.
                 - **Performance Bonus**: This will significantly increase the hit rate of Google Prompt Caching, thereby drastically speeding up response times and saving computing resources.
-        - **Claude Thinking Signature Encoding Fix (Fix Issue #726 - Thanks @zhuxijing123)**:
+        - **Claude Thinking Signature Encoding Fix (Fix Issue #726)**:
             - **Root Cause**: Fixed a regression introduced in v3.3.33, where the already Base64-encoded `thoughtSignature` was incorrectly re-encoded in Base64. This doubled encoding caused Google Vertex AI to fail signature verification, returning an `Invalid signature` error.
             - **Fix Details**: Removed redundant Base64 encoding steps in the `Thinking`, `ToolUse`, and `ToolResult` processing logic, ensuring the signature is passed through to the upstream in its original valid format.
             - **Impact**: Completely resolved the 400 signature error triggered when using Thinking models (e.g., Claude 4.5 Opus / Sonnet) in multi-turn conversations, as well as the resulting "Error searching files" infinite loop (Issue #737).
-        - **API Monitor Refresh Fix (Fix Issue #735 - Thanks @Mzs-code)**:
+        - **API Monitor Refresh Fix (Fix Issue #735)**:
             - **Root Cause**: Fixed the issue where new requests were not automatically appearing in the API Monitor list due to a Closure-related bug in the event listener.
             - **Fix Details**: Optimized the event buffering logic using `useRef`, added a manual Refresh button as a backup, and explicitly enabled Tauri event permissions.
-        - **Strict Grouped Quota Protection Fix (Core Thanks to @Mag1cFall)**:
+        - **Strict Grouped Quota Protection Fix (Core Thanks to @Mag1cFall PR #746)**:
             - **Root Cause**: Fixed an issue where quota protection failed in strict matching mode due to case sensitivity and missing frontend UI key mapping. Previously, UI shorthand keys like `gemini-pro` could not match the backend-defined `gemini-3-pro-high` strict group.
             - **Fix Details**:
                 - **Instant Case Normalization**: Restored case-insensitive matching in backend `normalize_to_standard_id`, ensuring variants like `Gemini-3-Pro-High` are correctly recognized.
