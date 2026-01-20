@@ -225,6 +225,14 @@ print(response.choices[0].message.content)
         -   **[Stability] VNC & Container Startup Logic Hardening (PR #881)**:
             -   **Zombie Process Cleanup**: Optimized cleanup logic in `start.sh` using `pkill` to precisely terminate Xtigervnc and websockify processes and clean up `/tmp/.X11-unix` lock files, resolving various VNC connection issues after restarts.
             -   **Healthcheck Upgrade**: Expanded Healthcheck to include websockify and the main application, ensuring container status more accurately reflects service availability.
+        -   **[Major Fix] Resolved 404 Errors for OpenAI Protocol Requests**:
+            -   **Fix Details**: Corrected the model parameter passing in `TokenManager` when fetching tokens, ensuring account matching logic aligns strictly with the original request model (e.g., `gpt-4`) instead of the internally mapped model name.
+            -   **Impact**: Fixed silent failures and 404 errors across all OpenAI protocol calls.
+        -   **[Protocol Enhancement] Completed Token Usage & Headers for OpenAI Legacy Endpoints**:
+            -   **Header Injection**: Refactored return logic for `/v1/responses` and `/v1/completions` to ensure `X-Mapped-Model` and `X-Account-Email` are injected in all execution paths.
+            -   **Usage Statistics**: Added the missing `usage` field in Legacy interface response bodies, resolving the issue where token consumption was not displayed in traffic logs.
+        -   **[System Consistency] Unified requestId Prefixes**:
+            -   **Fix Details**: Unified the `requestId` prefix for OpenAI paths from `openai-` to `agent-`, ensuring high consistency with Claude protocol characteristics and improving upstream compatibility.
     *   **v3.3.45 (2026-01-19)**:
         - **[Core] Critical Fix for Claude/Gemini SSE Interruptions & 0-Token Responses (Issue #859)**:
             - **Enhanced Peek Logic**: The proxy now loops through initial SSE chunks to filter out heartbeat pings and empty data, ensuring a valid content block is received before committing to a 200 OK response.

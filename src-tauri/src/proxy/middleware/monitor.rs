@@ -196,7 +196,10 @@ pub async fn monitor_middleware(
                         }
                         
                         // Token usage extraction
-                        if let Some(usage) = json.get("usage").or(json.get("usageMetadata")) {
+                        if let Some(usage) = json.get("usage")
+                            .or(json.get("usageMetadata"))
+                            .or(json.get("response").and_then(|r| r.get("usage")))
+                        {
                             log.input_tokens = usage.get("prompt_tokens")
                                 .or(usage.get("input_tokens"))
                                 .or(usage.get("promptTokenCount"))
@@ -254,7 +257,10 @@ pub async fn monitor_middleware(
                         if line.starts_with("data: ") && (line.contains("\"usage\"") || line.contains("\"usageMetadata\"")) {
                             let json_str = line.trim_start_matches("data: ").trim();
                             if let Ok(json) = serde_json::from_str::<Value>(json_str) {
-                                if let Some(usage) = json.get("usage").or(json.get("usageMetadata")) {
+                                if let Some(usage) = json.get("usage")
+                                    .or(json.get("usageMetadata"))
+                                    .or(json.get("response").and_then(|r| r.get("usage")))
+                                {
                                     log.input_tokens = usage.get("prompt_tokens")
                                         .or(usage.get("input_tokens"))
                                         .or(usage.get("promptTokenCount"))

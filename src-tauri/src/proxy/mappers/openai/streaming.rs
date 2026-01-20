@@ -96,9 +96,18 @@ pub fn create_openai_sse_stream(
     let stream = async_stream::stream! {
         let mut emitted_tool_calls = std::collections::HashSet::new();
         let mut final_usage: Option<super::models::OpenAIUsage> = None;
-        while let Some(item) = gemini_stream.next().await {
-            match item {
-                Ok(bytes) => {
+        let mut error_occurred = false;  // [FIX] 标志位,避免双重 [DONE]
+        
+        // [P2 FIX] 添加心跳定时器
+        let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        
+        loop {
+            tokio::select! {
+                // 处理上游数据
+                item = gemini_stream.next() => {
+                    match item {
+                        Some(Ok(bytes)) => {
                     // Verbose logging for debugging image fragmentation
                     debug!("[OpenAI-SSE] Received chunk: {} bytes", bytes.len());
                     buffer.extend_from_slice(&bytes);
@@ -292,7 +301,7 @@ pub fn create_openai_sse_stream(
 
                                             // 发送正常 content chunk
                                             if !content_out.is_empty() || finish_reason.is_some() {
-                                                let openai_chunk = json!({
+                                                let mut openai_chunk = json!({
                                                     "id": &stream_id,
                                                     "object": "chat.completion.chunk",
                                                     "created": created_ts,
@@ -307,6 +316,16 @@ pub fn create_openai_sse_stream(
                                                         }
                                                     ]
                                                 });
+                                                
+                                                // [FIX] 将 usage 嵌入到 chunk 中 (参考 CLIProxyAPI)
+                                                if let Some(ref usage) = final_usage {
+                                                    openai_chunk["usage"] = serde_json::to_value(usage).unwrap();
+                                                }
+                                                
+                                                // [FIX] 如果是最后一个 chunk,标记 usage 已发送
+                                                if finish_reason.is_some() {
+                                                    final_usage = None;
+                                                }
 
                                                 let sse_out = format!("data: {}\n\n", serde_json::to_string(&openai_chunk).unwrap_or_default());
                                                 yield Ok::<Bytes, String>(Bytes::from(sse_out));
@@ -318,57 +337,59 @@ pub fn create_openai_sse_stream(
                         }
                     }
                 }
-                Err(e) => {
-                    use crate::proxy::mappers::error_classifier::classify_stream_error;
-                    let (error_type, user_message, i18n_key) = classify_stream_error(&e);
-                    
-                    tracing::error!(
-                        error_type = %error_type,
-                        user_message = %user_message,
-                        i18n_key = %i18n_key,
-                        raw_error = %e,
-                        "OpenAI stream error occurred"
-                    );
-                    
-                    // 发送友好的 SSE 错误事件(包含 i18n_key 供前端翻译)
-                    let error_chunk = json!({
-                        "id": &stream_id,
-                        "object": "chat.completion.chunk",
-                        "created": created_ts,
-                        "model": &model,
-                        "choices": [],
-                        "error": {
-                            "type": error_type,
-                            "message": user_message,
-                            "code": "stream_error",
-                            "i18n_key": i18n_key
+                        Some(Err(e)) => {
+                            use crate::proxy::mappers::error_classifier::classify_stream_error;
+                            let (error_type, user_message, i18n_key) = classify_stream_error(&e);
+                            
+                            tracing::error!(
+                                error_type = %error_type,
+                                user_message = %user_message,
+                                i18n_key = %i18n_key,
+                                raw_error = %e,
+                                "OpenAI stream error occurred"
+                            );
+                            
+                            // 发送友好的 SSE 错误事件(包含 i18n_key 供前端翻译)
+                            let error_chunk = json!({
+                                "id": &stream_id,
+                                "object": "chat.completion.chunk",
+                                "created": created_ts,
+                                "model": &model,
+                                "choices": [],
+                                "error": {
+                                    "type": error_type,
+                                    "message": user_message,
+                                    "code": "stream_error",
+                                    "i18n_key": i18n_key
+                                }
+                            });
+                            
+                            let sse_out = format!("data: {}\n\n", serde_json::to_string(&error_chunk).unwrap_or_default());
+                            yield Ok(Bytes::from(sse_out));
+                            yield Ok(Bytes::from("data: [DONE]\n\n"));
+                            error_occurred = true;  // [FIX] 标记错误已发生
+                            break;
                         }
-                    });
-                    
-                    let sse_out = format!("data: {}\n\n", serde_json::to_string(&error_chunk).unwrap_or_default());
-                    yield Ok(Bytes::from(sse_out));
-                    yield Ok(Bytes::from("data: [DONE]\n\n"));
-                    break;
+                        None => {
+                            // 流结束
+                            break;
+                        }
+                    }
+                }
+                
+                // [P2 FIX] 发送心跳
+                _ = heartbeat_interval.tick() => {
+                    // 发送 SSE 注释作为心跳
+                    yield Ok::<Bytes, String>(Bytes::from(": ping\n\n"));
                 }
             }
         }
         
-        // Emit usage event if captured before [DONE]
-        if let Some(usage) = final_usage {
-            let usage_chunk = json!({
-                "id": &stream_id,
-                "object": "chat.completion.chunk",
-                "created": created_ts,
-                "model": &model,
-                "choices": [],
-                "usage": usage
-            });
-            let sse_out = format!("data: {}\n\n", serde_json::to_string(&usage_chunk).unwrap_or_default());
-            yield Ok::<Bytes, String>(Bytes::from(sse_out));
+        // [FIX] 只有在没有错误时才发送 [DONE]
+        // usage 已经嵌入到 finish_reason chunk,不需要单独发送
+        if !error_occurred {
+            yield Ok::<Bytes, String>(Bytes::from("data: [DONE]\n\n"));
         }
-        
-        // End of stream signal for OpenAI
-        yield Ok::<Bytes, String>(Bytes::from("data: [DONE]\n\n"));
     };
 
     Box::pin(stream)
@@ -394,9 +415,18 @@ pub fn create_legacy_sse_stream(
     
     let stream = async_stream::stream! {
         let mut final_usage: Option<super::models::OpenAIUsage> = None;
-        while let Some(item) = gemini_stream.next().await {
-            match item {
-                Ok(bytes) => {
+        let mut error_occurred = false;  // [FIX] 标志位,避免双重 [DONE]
+        
+        // [P2 FIX] 添加心跳定时器
+        let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        
+        loop {
+            tokio::select! {
+                // 处理上游数据
+                item = gemini_stream.next() => {
+                    match item {
+                        Some(Ok(bytes)) => {
                     buffer.extend_from_slice(&bytes);
                     while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
                         let line_raw = buffer.split_to(pos + 1);
@@ -450,7 +480,7 @@ pub fn create_legacy_sse_stream(
                                         });
 
                                     // Construct LEGACY completion chunk - STRICT VERSION
-                                    let legacy_chunk = json!({
+                                    let mut legacy_chunk = json!({
                                         "id": &stream_id,
                                         "object": "text_completion",
                                         "created": created_ts,
@@ -464,6 +494,16 @@ pub fn create_legacy_sse_stream(
                                             }
                                         ]
                                     });
+                                    
+                                    // [FIX] 将 usage 嵌入到 chunk 中
+                                    if let Some(ref usage) = final_usage {
+                                        legacy_chunk["usage"] = serde_json::to_value(usage).unwrap();
+                                    }
+                                    
+                                    // [FIX] 如果是最后一个 chunk,标记 usage 已发送
+                                    if finish_reason.is_some() {
+                                        final_usage = None;
+                                    }
 
                                     let json_str = serde_json::to_string(&legacy_chunk).unwrap_or_default();
                                     tracing::debug!("Legacy Stream Chunk: {}", json_str); 
@@ -474,59 +514,62 @@ pub fn create_legacy_sse_stream(
                         }
                     }
                 }
-                Err(e) => {
-                    use crate::proxy::mappers::error_classifier::classify_stream_error;
-                    let (error_type, user_message, i18n_key) = classify_stream_error(&e);
-                    
-                    tracing::error!(
-                        error_type = %error_type,
-                        user_message = %user_message,
-                        i18n_key = %i18n_key,
-                        raw_error = %e,
-                        "Legacy stream error occurred"
-                    );
-                    
-                    // 发送友好的 SSE 错误事件(包含 i18n_key 供前端翻译)
-                    let error_chunk = json!({
-                        "id": &stream_id,
-                        "object": "text_completion",
-                        "created": created_ts,
-                        "model": &model,
-                        "choices": [],
-                        "error": {
-                            "type": error_type,
-                            "message": user_message,
-                            "code": "stream_error",
-                            "i18n_key": i18n_key
+                        Some(Err(e)) => {
+                            use crate::proxy::mappers::error_classifier::classify_stream_error;
+                            let (error_type, user_message, i18n_key) = classify_stream_error(&e);
+                            
+                            tracing::error!(
+                                error_type = %error_type,
+                                user_message = %user_message,
+                                i18n_key = %i18n_key,
+                                raw_error = %e,
+                                "Legacy stream error occurred"
+                            );
+                            
+                            // 发送友好的 SSE 错误事件(包含 i18n_key 供前端翻译)
+                            let error_chunk = json!({
+                                "id": &stream_id,
+                                "object": "text_completion",
+                                "created": created_ts,
+                                "model": &model,
+                                "choices": [],
+                                "error": {
+                                    "type": error_type,
+                                    "message": user_message,
+                                    "code": "stream_error",
+                                    "i18n_key": i18n_key
+                                }
+                            });
+                            
+                            let sse_out = format!("data: {}\n\n", serde_json::to_string(&error_chunk).unwrap_or_default());
+                            yield Ok(Bytes::from(sse_out));
+                            yield Ok(Bytes::from("data: [DONE]\n\n"));
+                            error_occurred = true;  // [FIX] 标记错误已发生
+                            break;
                         }
-                    });
-                    
-                    let sse_out = format!("data: {}\n\n", serde_json::to_string(&error_chunk).unwrap_or_default());
-                    yield Ok(Bytes::from(sse_out));
-                    yield Ok(Bytes::from("data: [DONE]\n\n"));
-                    break;
+                        None => {
+                            // 流结束
+                            break;
+                        }
+                    }
+                }
+                
+                // [P2 FIX] 发送心跳
+                _ = heartbeat_interval.tick() => {
+                    // 发送 SSE 注释作为心跳
+                    yield Ok::<Bytes, String>(Bytes::from(": ping\n\n"));
                 }
             }
         }
         
-        // Emit usage event if captured before [DONE]
-        if let Some(usage) = final_usage {
-            let usage_chunk = json!({
-                "id": &stream_id,
-                "object": "text_completion",
-                "created": created_ts,
-                "model": &model,
-                "choices": [],
-                "usage": usage
-            });
-            let sse_out = format!("data: {}\n\n", serde_json::to_string(&usage_chunk).unwrap_or_default());
-            yield Ok::<Bytes, String>(Bytes::from(sse_out));
+        // [FIX] 只有在没有错误时才发送 [DONE]
+        // usage 已经嵌入到 finish_reason chunk,不需要单独发送
+        if !error_occurred {
+            tracing::debug!("Stream finished. Yielding [DONE]");
+            yield Ok::<Bytes, String>(Bytes::from("data: [DONE]\n\n"));
+            // Final flush delay
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        
-        tracing::debug!("Stream finished. Yielding [DONE]");
-        yield Ok::<Bytes, String>(Bytes::from("data: [DONE]\n\n"));
-        // Final flush delay
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
 
     Box::pin(stream)
@@ -563,266 +606,202 @@ pub fn create_codex_sse_stream(
         let mut full_content = String::new();
         let mut emitted_tool_calls = std::collections::HashSet::new();
         let mut last_finish_reason = "stop".to_string();
-        let mut _accumulated_usage: Option<super::models::OpenAIUsage> = None;
+        let mut accumulated_usage: Option<super::models::OpenAIUsage> = None;
 
-        while let Some(item) = gemini_stream.next().await {
-            match item {
-                Ok(bytes) => {
-                    buffer.extend_from_slice(&bytes);
-                    while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
-                        let line_raw = buffer.split_to(pos + 1);
-                        if let Ok(line_str) = std::str::from_utf8(&line_raw) {
-                            let line = line_str.trim();
-                            if line.is_empty() || !line.starts_with("data: ") { continue; }
-                            
-                            let json_part = line.trim_start_matches("data: ").trim();
-                            if json_part == "[DONE]" { continue; }
+        // [P2 FIX] Add heartbeat interval for Codex stream
+        let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-                            if let Ok(mut json) = serde_json::from_str::<Value>(json_part) {
-                                let actual_data = if let Some(inner) = json.get_mut("response").map(|v| v.take()) { inner } else { json };
-                                
-                                // Capture usageMetadata if present
-                                if let Some(u) = actual_data.get("usageMetadata") {
-                                    _accumulated_usage = extract_usage_metadata(u);
-                                }
-                                
-                                // Capture finish reason
-                                if let Some(candidates) = actual_data.get("candidates").and_then(|c| c.as_array()) {
-                                    if let Some(candidate) = candidates.get(0) {
-                                        if let Some(reason) = candidate.get("finishReason").and_then(|r| r.as_str()) {
-                                            last_finish_reason = match reason {
-                                                "STOP" => "stop".to_string(),
-                                                "MAX_TOKENS" => "length".to_string(),
-                                                _ => "stop".to_string(),
-                                            };
+        loop {
+            tokio::select! {
+                // Heartbeat
+                _ = heartbeat_interval.tick() => {
+                    yield Ok::<Bytes, String>(Bytes::from(": ping\n\n"));
+                }
+
+                // Upstream data
+                item = gemini_stream.next() => {
+                    match item {
+                        Some(Ok(bytes)) => {
+                            buffer.extend_from_slice(&bytes);
+                            while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+                                let line_raw = buffer.split_to(pos + 1);
+                                if let Ok(line_str) = std::str::from_utf8(&line_raw) {
+                                    let line = line_str.trim();
+                                    if line.is_empty() || !line.starts_with("data: ") { continue; }
+                                    
+                                    let json_part = line.trim_start_matches("data: ").trim();
+                                    if json_part == "[DONE]" { continue; }
+
+                                    if let Ok(mut json) = serde_json::from_str::<Value>(json_part) {
+                                        let actual_data = if let Some(inner) = json.get_mut("response").map(|v| v.take()) { inner } else { json };
+                                        
+                                        // Capture usageMetadata if present
+                                        if let Some(u) = actual_data.get("usageMetadata") {
+                                            accumulated_usage = extract_usage_metadata(u);
                                         }
-                                    }
-                                }
+                                        
+                                        // Capture finish reason
+                                        if let Some(candidates) = actual_data.get("candidates").and_then(|c| c.as_array()) {
+                                            if let Some(candidate) = candidates.get(0) {
+                                                if let Some(reason) = candidate.get("finishReason").and_then(|r| r.as_str()) {
+                                                    last_finish_reason = match reason {
+                                                        "STOP" => "stop".to_string(),
+                                                        "MAX_TOKENS" => "length".to_string(),
+                                                        _ => "stop".to_string(),
+                                                    };
+                                                }
+                                            }
+                                        }
 
-                                // text delta
-                                let mut delta_text = String::new();
-                                if let Some(candidates) = actual_data.get("candidates").and_then(|c| c.as_array()) {
-                                    if let Some(candidate) = candidates.get(0) {
-                                        if let Some(parts) = candidate.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
-                                            for part in parts {
-                                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                                    // Sanitize smart quotes to standard quotes for JSON compatibility
-                                                    let clean_text = text.replace('“', "\"").replace('”', "\"");
-                                                    delta_text.push_str(&clean_text);
-                                                }
-                                                /* 禁用思维链输出到正文
-                                                if let Some(thought_text) = part.get("thought").and_then(|t| t.as_str()) {
-                                                    let clean_thought = thought_text.replace('"', "\"").replace('"', "\"");
-                                                    // delta_text.push_str(&clean_thought);
-                                                }
-                                                */
-                                                // 捕获 thoughtSignature (Gemini 3 工具调用必需)
-                                                // 存储到全局状态，不再嵌入到用户可见的文本中
-                                                if let Some(sig) = part.get("thoughtSignature").or(part.get("thought_signature")).and_then(|s| s.as_str()) {
-                                                    tracing::debug!("[Codex-SSE] 捕获 thoughtSignature (长度: {})", sig.len());
-                                                    store_thought_signature(sig);
-                                                }
-                                                // Handle function call in chunk with deduplication
-                                                if let Some(func_call) = part.get("functionCall") {
-                                                    let call_key = serde_json::to_string(func_call).unwrap_or_default();
-                                                    if !emitted_tool_calls.contains(&call_key) {
-                                                        emitted_tool_calls.insert(call_key);
-
-                                                                                let name = func_call.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
-                                                                                let _args = func_call.get("args").unwrap_or(&json!({})).to_string();                                                        
-                                                        // Stable ID generation based on hashed content to be consistent
-                                                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                                                        use std::hash::{Hash, Hasher};
-                                                        serde_json::to_string(func_call).unwrap_or_default().hash(&mut hasher);
-                                                        let call_id = format!("call_{:x}", hasher.finish());
+                                        // text delta
+                                        let mut delta_text = String::new();
+                                        if let Some(candidates) = actual_data.get("candidates").and_then(|c| c.as_array()) {
+                                            if let Some(candidate) = candidates.get(0) {
+                                                if let Some(parts) = candidate.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
+                                                    for part in parts {
+                                                        if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                                            let clean_text = text.replace('“', "\"").replace('”', "\"");
+                                                            delta_text.push_str(&clean_text);
+                                                        }
                                                         
-                                                        // Parse args once
-                                                        let fallback_args = json!({});
-                                                        let args_obj = func_call.get("args").unwrap_or(&fallback_args);
-                                                        // Fallback for function_call arguments string
-                                                        let args_str = args_obj.to_string();
-
-                                                        let name_str = name.to_string();
+                                                        // 捕获 thoughtSignature
+                                                        if let Some(sig) = part.get("thoughtSignature").or(part.get("thought_signature")).and_then(|s| s.as_str()) {
+                                                            tracing::debug!("[Codex-SSE] 捕获 thoughtSignature (长度: {})", sig.len());
+                                                            store_thought_signature(sig);
+                                                        }
                                                         
-                                                        // Determine event type based on tool name
-                                                        // 使用 Option 来允许某些情况跳过工具调用
-                                                        let maybe_item_added_ev: Option<Value> = if name_str == "shell" || name_str == "local_shell" {
-                                                            // Map to local_shell_call
-                                                            tracing::debug!("[Debug] func_call: {}", serde_json::to_string(&func_call).unwrap_or_default());
-                                                            tracing::debug!("[Debug] args_obj: {}", serde_json::to_string(&args_obj).unwrap_or_default());
-                                                            
-                                                            // 解析命令：支持数组格式、字符串格式，以及空 args 情况
-                                                            let cmd_vec: Vec<String> = if args_obj.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                                                                // args 为空时使用静默成功命令，避免任务中断
-                                                                tracing::debug!("shell command args 为空，使用静默成功命令继续流程");
-                                                                vec!["powershell.exe".to_string(), "-Command".to_string(), "exit 0".to_string()]
-                                                            } else if let Some(arr) = args_obj.get("command").and_then(|v| v.as_array()) {
-                                                                // 数组格式
-                                                                arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect()
-                                                            } else if let Some(cmd_str) = args_obj.get("command").and_then(|v| v.as_str()) {
-                                                                // 字符串格式
-                                                                if cmd_str.contains(' ') {
-                                                                    vec!["powershell.exe".to_string(), "-Command".to_string(), cmd_str.to_string()]
+                                                        // Handle function call in chunk with deduplication
+                                                        if let Some(func_call) = part.get("functionCall") {
+                                                            let call_key = serde_json::to_string(func_call).unwrap_or_default();
+                                                            if !emitted_tool_calls.contains(&call_key) {
+                                                                emitted_tool_calls.insert(call_key);
+
+                                                                let name = func_call.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                                                let name_str = name.to_string();
+                                                                
+                                                                let fallback_args = json!({});
+                                                                let args_obj = func_call.get("args").unwrap_or(&fallback_args);
+                                                                let args_str = args_obj.to_string();
+
+                                                                // Use content-based hash for call_id
+                                                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                                                use std::hash::{Hash, Hasher};
+                                                                name_str.hash(&mut hasher);
+                                                                args_str.hash(&mut hasher);
+                                                                let call_id = format!("call_{:x}", hasher.finish());
+                                                                
+                                                                // Determine event type based on tool name
+                                                                let maybe_item_added_ev: Option<Value> = if name_str == "shell" || name_str == "local_shell" {
+                                                                    // Map to local_shell_call
+                                                                    let cmd_vec: Vec<String> = if args_obj.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                                                                        vec!["powershell.exe".to_string(), "-Command".to_string(), "exit 0".to_string()]
+                                                                    } else if let Some(arr) = args_obj.get("command").and_then(|v| v.as_array()) {
+                                                                        arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect()
+                                                                    } else if let Some(cmd_str) = args_obj.get("command").and_then(|v| v.as_str()) {
+                                                                        if cmd_str.contains(' ') {
+                                                                            vec!["powershell.exe".to_string(), "-Command".to_string(), cmd_str.to_string()]
+                                                                        } else {
+                                                                            vec![cmd_str.to_string()]
+                                                                        }
+                                                                    } else {
+                                                                        vec!["powershell.exe".to_string(), "-Command".to_string(), "exit 0".to_string()]
+                                                                    };
+                                                                    
+                                                                    Some(json!({
+                                                                        "type": "response.output_item.added",
+                                                                        "item": {
+                                                                            "type": "local_shell_call",
+                                                                            "status": "in_progress",
+                                                                            "call_id": &call_id,
+                                                                            "action": {
+                                                                                "type": "exec",
+                                                                                "command": cmd_vec
+                                                                            }
+                                                                        }
+                                                                    }))
+                                                                } else if name_str == "googleSearch" || name_str == "web_search" || name_str == "google_search" {
+                                                                    // Map to web_search_call
+                                                                    let query_val = args_obj.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                                                                    Some(json!({
+                                                                        "type": "response.output_item.added",
+                                                                        "item": {
+                                                                            "type": "web_search_call",
+                                                                            "status": "in_progress",
+                                                                            "call_id": &call_id,
+                                                                            "action": {
+                                                                                "type": "search",
+                                                                                "query": query_val
+                                                                            }
+                                                                        }
+                                                                    }))
                                                                 } else {
-                                                                    vec![cmd_str.to_string()]
-                                                                }
-                                                            } else {
-                                                                // command 字段缺失，使用静默成功命令
-                                                                tracing::debug!("shell command 缺少 command 字段，使用静默成功命令");
-                                                                vec!["powershell.exe".to_string(), "-Command".to_string(), "exit 0".to_string()]
-                                                            };
-                                                            
-                                                            tracing::debug!("Shell 命令解析: {:?}", cmd_vec);
-                                                            Some(json!({
-                                                                "type": "response.output_item.added",
-                                                                "item": {
-                                                                    "type": "local_shell_call",
-                                                                    "status": "in_progress",
-                                                                    "call_id": &call_id,
-                                                                    "action": {
-                                                                        "type": "exec",
-                                                                        "command": cmd_vec
-                                                                    }
-                                                                }
-                                                            }))
-                                                        } else if name_str == "googleSearch" || name_str == "web_search" || name_str == "google_search" {
-                                                            // Map to web_search_call
-                                                            let query_val = args_obj.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                                                            Some(json!({
-                                                                "type": "response.output_item.added",
-                                                                "item": {
-                                                                    "type": "web_search_call",
-                                                                    "status": "in_progress",
-                                                                    "call_id": &call_id,
-                                                                    "action": {
-                                                                        "type": "search",
-                                                                        "query": query_val
-                                                                    }
-                                                                }
-                                                            }))
-                                                        } else {
-                                                            // Default function_call
-                                                            Some(json!({
-                                                                "type": "response.output_item.added",
-                                                                "item": {
-                                                                    "type": "function_call",
-                                                                    "name": name,
-                                                                    "arguments": args_str,
-                                                                    "call_id": &call_id
-                                                                }
-                                                            }))
-                                                        };
+                                                                    // Default function_call
+                                                                    Some(json!({
+                                                                        "type": "response.output_item.added",
+                                                                        "item": {
+                                                                            "type": "function_call",
+                                                                            "name": name,
+                                                                            "arguments": args_str,
+                                                                            "call_id": &call_id
+                                                                        }
+                                                                    }))
+                                                                };
 
-                                                        // 只有在有事件时才发送
-                                                        if let Some(item_added_ev) = maybe_item_added_ev {
-                                                            yield Ok::<Bytes, String>(Bytes::from(format!("data: {}\n\n", serde_json::to_string(&item_added_ev).unwrap())));
-
-                                                        // Emit response.output_item.done (matching the added event)
-                                                        // 复用相同的 cmd_vec 逻辑
-                                                        let item_done_ev = if name_str == "shell" || name_str == "local_shell" {
-                                                            let cmd_vec_done: Vec<String> = if let Some(arr) = args_obj.get("command").and_then(|v| v.as_array()) {
-                                                                arr.iter()
-                                                                    .filter_map(|v| v.as_str())
-                                                                    .map(|s| s.to_string())
-                                                                    .collect()
-                                                            } else if let Some(cmd_str) = args_obj.get("command").and_then(|v| v.as_str()) {
-                                                                if cmd_str.contains(' ') {
-                                                                    vec!["powershell.exe".to_string(), "-Command".to_string(), cmd_str.to_string()]
-                                                                } else {
-                                                                    vec![cmd_str.to_string()]
-                                                                }
-                                                            } else {
-                                                                vec!["powershell.exe".to_string(), "-Command".to_string(), "echo 'Invalid command'".to_string()]
-                                                            };
-                                                            json!({
-                                                                "type": "response.output_item.done",
-                                                                "item": {
-                                                                    "type": "local_shell_call",
-                                                                    "status": "in_progress",
-                                                                    "call_id": call_id,
-                                                                     "action": {
-                                                                        "type": "exec",
-                                                                        "command": cmd_vec_done
+                                                                if let Some(item_added_ev) = maybe_item_added_ev {
+                                                                    yield Ok::<Bytes, String>(Bytes::from(format!("data: {}\n\n", serde_json::to_string(&item_added_ev).unwrap())));
+                                                                    
+                                                                    // Emit response.output_item.done
+                                                                    let mut item_done_ev = item_added_ev.clone();
+                                                                    if let Some(obj) = item_done_ev.as_object_mut() {
+                                                                        obj.insert("type".to_string(), json!("response.output_item.done"));
                                                                     }
+                                                                    yield Ok::<Bytes, String>(Bytes::from(format!("data: {}\n\n", serde_json::to_string(&item_done_ev).unwrap())));
                                                                 }
-                                                            })
-                                                        } else if name_str == "googleSearch" || name_str == "web_search" || name_str == "google_search" {
-                                                            let query_val = args_obj.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                                                             json!({
-                                                                "type": "response.output_item.done",
-                                                                "item": {
-                                                                    "type": "web_search_call",
-                                                                    "status": "in_progress",
-                                                                    "call_id": call_id,
-                                                                    "action": {
-                                                                        "type": "search",
-                                                                        "query": query_val
-                                                                    }
-                                                                }
-                                                            })
-                                                        } else {
-                                                            json!({
-                                                                "type": "response.output_item.done",
-                                                                "item": {
-                                                                    "type": "function_call",
-                                                                    "name": name,
-                                                                    "arguments": args_str,
-                                                                    "call_id": call_id
-                                                                }
-                                                            })
-                                                        };
-
-                                                        yield Ok::<Bytes, String>(Bytes::from(format!("data: {}\n\n", serde_json::to_string(&item_done_ev).unwrap())));
-                                                        } // 关闭 if let Some(item_added_ev)
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
-                                }
 
-                                if !delta_text.is_empty() {
-                                    full_content.push_str(&delta_text);
-                                    // 2. Emit response.output_text.delta
-                                    let delta_ev = json!({
-                                        "type": "response.output_text.delta",
-                                        "delta": delta_text
-                                    });
-                                    yield Ok::<Bytes, String>(Bytes::from(format!("data: {}\n\n", serde_json::to_string(&delta_ev).unwrap())));
+                                        if !delta_text.is_empty() {
+                                            full_content.push_str(&delta_text);
+                                            // 2. Emit response.output_text.delta
+                                            let delta_ev = json!({
+                                                "type": "response.output_text.delta",
+                                                "delta": delta_text
+                                            });
+                                            yield Ok::<Bytes, String>(Bytes::from(format!("data: {}\n\n", serde_json::to_string(&delta_ev).unwrap())));
+                                        }
+                                    }
                                 }
                             }
                         }
-                    }
-                }
-                Err(e) => {
-                    use crate::proxy::mappers::error_classifier::classify_stream_error;
-                    let (error_type, user_message, i18n_key) = classify_stream_error(&e);
-                    
-                    tracing::error!(
-                        error_type = %error_type,
-                        user_message = %user_message,
-                        i18n_key = %i18n_key,
-                        raw_error = %e,
-                        "Codex stream error occurred"
-                    );
-                    
-                    // 发送友好的错误事件(包含 i18n_key 供前端翻译)
-                    let error_ev = json!({
-                        "type": "error",
-                        "error": {
-                            "type": error_type,
-                            "message": user_message,
-                            "code": "stream_error",
-                            "i18n_key": i18n_key
+                        Some(Err(e)) => {
+                            use crate::proxy::mappers::error_classifier::classify_stream_error;
+                            let (error_type, user_message, i18n_key) = classify_stream_error(&e);
+                            let error_ev = json!({
+                                "type": "error",
+                                "error": {
+                                    "type": error_type,
+                                    "message": user_message,
+                                    "code": "stream_error",
+                                    "i18n_key": i18n_key
+                                }
+                            });
+                            yield Ok(Bytes::from(format!("data: {}\n\n", serde_json::to_string(&error_ev).unwrap())));
+                            break;
                         }
-                    });
-                    yield Ok(Bytes::from(format!("data: {}\n\n", serde_json::to_string(&error_ev).unwrap())));
-                    break;
+                        None => {
+                            break;
+                        }
+                    }
                 }
             }
         }
 
-        // 3. Emit response.output_item.done
+        // 3. Emit response.output_item.done for the main message
         let item_done_ev = json!({
             "type": "response.output_item.done",
             "item": {
@@ -838,173 +817,6 @@ pub fn create_codex_sse_stream(
         });
         yield Ok::<Bytes, String>(Bytes::from(format!("data: {}\n\n", serde_json::to_string(&item_done_ev).unwrap())));
 
-        // SSOP: Check full_content for embedded JSON command signatures if no tools were emitted natively
-        if emitted_tool_calls.is_empty() {
-            // Try to find a JSON block containing "command"
-            // Simple heuristic: look for { and }
-            // We search for the *last* valid JSON block that has a "command" field, as the model might output reasoning first.
-            
-            let mut detected_cmd_val = None;
-            let mut detected_cmd_type = "unknown";
-
-            // Find all potential JSON start/end indices
-            let chars: Vec<char> = full_content.chars().collect();
-            let mut depth = 0;
-            let mut start_idx = 0;
-            
-            // Scan for top-level JSON objects
-            for (i, c) in chars.iter().enumerate() {
-                if *c == '{' {
-                    if depth == 0 { start_idx = i; }
-                    depth += 1;
-                } else if *c == '}' {
-                    if depth > 0 {
-                        depth -= 1;
-                        if depth == 0 {
-                            // Found a potential JSON object block [start_idx..=i]
-                            let json_str: String = chars[start_idx..=i].iter().collect();
-                            if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
-                                // Check for "command" field
-                                if let Some(cmd_val) = val.get("command") {
-                                    // Found a command! Identify type.
-                                    // Case 1: "command": ["shell", ...] or ["ls", ...]
-                                    if let Some(arr) = cmd_val.as_array() {
-                                        if let Some(first) = arr.get(0).and_then(|v| v.as_str()) {
-                                            if first == "shell" || first == "powershell" || first == "cmd" || first == "ls" || first == "git" || first == "echo" {
-                                                detected_cmd_type = "shell";
-                                                detected_cmd_val = Some(cmd_val.clone());
-                                            }
-                                        }
-                                    } 
-                                    // Case 2: "command": "shell" (String) and "args": { "command": "..." }
-                                    // This matches the user's latest screenshot which failed SSOP.
-                                    else if let Some(cmd_str) = cmd_val.as_str() {
-                                        if cmd_str == "shell" || cmd_str == "local_shell" {
-                                             // Enhanced matching for params/argument
-                                             if let Some(args) = val.get("args").or(val.get("arguments")).or(val.get("params")) {
-                                                  if let Some(inner_cmd) = args.get("command").or(args.get("code")).or(args.get("argument")) {
-                                                      // We construct a synthetic array: ["shell", inner_cmd]
-                                                      // So subsequent logic can process it.
-                                                      // Actually, let's just grab the inner command string.
-                                                      if let Some(inner_cmd_str) = inner_cmd.as_str() {
-                                                          detected_cmd_type = "shell";
-                                                          detected_cmd_val = Some(json!([inner_cmd_str]));
-                                                      }
-                                                  }
-                                              }
-                                        }
-                                    }
-                                }
-                            } else {
-                                // Fallback for malformed JSON (e.g. unescaped quotes)
-                                // 注意: 使用安全的切片方法避免 UTF-8 边界 panic
-                                if (json_str.contains("\"command\": \"shell\"") || json_str.contains("\"command\": \"local_shell\"")) 
-                                   && (json_str.contains("\"argument\":") || json_str.contains("\"code\":")) {
-                                    
-                                    let keys = ["\"argument\":", "\"code\":", "\"command\":"];
-                                    for key in keys {
-                                        if let Some(pos) = json_str.find(key) {
-                                            // 使用安全的 get() 方法替代直接索引
-                                            let slice_start = pos + key.len();
-                                            if let Some(slice_after_key) = json_str.get(slice_start..) {
-                                                if let Some(quote_idx) = slice_after_key.find('"') {
-                                                    let val_start_abs = slice_start + quote_idx + 1;
-                                                    if let Some(last_quote_idx) = json_str.rfind('"') {
-                                                        if last_quote_idx > val_start_abs {
-                                                            // 使用 get() 安全获取子字符串
-                                                            if let Some(raw_cmd) = json_str.get(val_start_abs..last_quote_idx) {
-                                                                detected_cmd_type = "shell";
-                                                                detected_cmd_val = Some(json!([raw_cmd]));
-                                                                tracing::debug!("SSOP: Recovered malformed JSON command: {}", raw_cmd);
-                                                                break;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some(cmd_val) = detected_cmd_val {
-                if detected_cmd_type == "shell" {
-                     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                     use std::hash::{Hash, Hasher};
-                     "ssop_shell_call".hash(&mut hasher); // Unique seed
-                     serde_json::to_string(&cmd_val).unwrap_or_default().hash(&mut hasher);
-                     let call_id = format!("call_{:x}", hasher.finish());
-
-                     let mut cmd_vec: Vec<String> = cmd_val.as_array().unwrap().iter().map(|v| v.as_str().unwrap_or("").to_string()).collect();
-                     
-                     // Helper to ensure it runs in shell properly
-                     // Problem: Model often outputs ["shell", "powershell", "-Command", ...]
-                     // "shell" is not a valid executable on Windows. We must strip it if it's acting as a label.
-                     if !cmd_vec.is_empty() && (cmd_vec[0] == "shell" || cmd_vec[0] == "local_shell") {
-                         cmd_vec.remove(0);
-                     }
-
-                     // Now check if empty or needs wrapping
-                     let final_cmd_vec = if cmd_vec.is_empty() {
-                         vec!["powershell".to_string(), "-Command".to_string(), "echo 'Empty command'".to_string()]
-                     } else if cmd_vec[0] == "powershell" || cmd_vec[0] == "cmd" || cmd_vec[0] == "git" || cmd_vec[0] == "python" || cmd_vec[0] == "node" {
-                         cmd_vec
-                     } else {
-                         // Wrap generic commands (ls, dir, echo, etc) in powershell for Windows safety
-                        // Use EncodedCommand to avoid quoting hell
-                        // AND pipe to Out-String to avoid CLIXML object output which breaks Gemini
-                        let raw_cmd = cmd_vec.join(" ");
-                        let joined = format!("& {{ {} }} | Out-String", raw_cmd);
-                        let utf16: Vec<u16> = joined.encode_utf16().collect();
-                        let mut bytes = Vec::with_capacity(utf16.len() * 2);
-                        for c in utf16 {
-                            bytes.extend_from_slice(&c.to_le_bytes());
-                        }
-                        use base64::Engine as _;
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                        
-                        vec!["powershell".to_string(), "-EncodedCommand".to_string(), b64]
-                    };
-
-                     tracing::debug!("SSOP: Detected Shell Command in Text, Injecting Event: {:?}", final_cmd_vec);
-
-                     // Emit added
-                     let item_added_ev = json!({
-                        "type": "response.output_item.added",
-                        "item": {
-                            "type": "local_shell_call",
-                            "status": "in_progress",
-                            "call_id": &call_id,
-                            "action": {
-                                "type": "exec",
-                                "command": final_cmd_vec
-                            }
-                        }
-                    });
-                    yield Ok::<Bytes, String>(Bytes::from(format!("data: {}\n\n", serde_json::to_string(&item_added_ev).unwrap())));
-
-                    // Emit done
-                    let item_done_ev = json!({
-                        "type": "response.output_item.done",
-                        "item": {
-                            "type": "local_shell_call",
-                            "status": "in_progress",
-                            "call_id": &call_id,
-                             "action": {
-                                "type": "exec",
-                                "command": final_cmd_vec
-                            }
-                        }
-                    });
-                    yield Ok::<Bytes, String>(Bytes::from(format!("data: {}\n\n", serde_json::to_string(&item_done_ev).unwrap())));
-                }
-            }
-        }
-
         // 4. Emit response.completed
         let completed_ev = json!({
             "type": "response.completed",
@@ -1013,13 +825,19 @@ pub fn create_codex_sse_stream(
                 "object": "response",
                 "status": "completed",
                 "finish_reason": last_finish_reason,
-                "usage": {
+                "usage": accumulated_usage.map(|u| json!({
+                    "input_tokens": u.prompt_tokens,
+                    "input_tokens_details": { "cached_tokens": 0 },
+                    "output_tokens": u.completion_tokens,
+                    "output_tokens_details": { "reasoning_tokens": 0 },
+                    "total_tokens": u.total_tokens
+                })).unwrap_or(json!({
                     "input_tokens": 0,
                     "input_tokens_details": { "cached_tokens": 0 },
                     "output_tokens": 0,
                     "output_tokens_details": { "reasoning_tokens": 0 },
                     "total_tokens": 0
-                }
+                }))
             }
         });
         yield Ok::<Bytes, String>(Bytes::from(format!("data: {}\n\n", serde_json::to_string(&completed_ev).unwrap())));

@@ -243,6 +243,14 @@ print(response.choices[0].message.content)
         -   **[稳定性修复] VNC 与容器启动逻辑加固 (PR #881)**:
             -   **僵尸进程清理**: 优化了 `start.sh` 中的 cleanup 逻辑，改用 `pkill` 精准查杀 Xtigervnc 和 websockify 进程，并清理 `/tmp/.X11-unix` 锁文件，解决了重启后 VNC 无法连接的各种边缘情况。
             -   **健康检查升级**: 将 Healthcheck 检查项扩展到 websockify 和主程序，确保容器状态更真实地反映服务可用性。
+        -   **[重大修复] 修复 OpenAI 协议请求返回 404 的问题**:
+            -   **修复内容**: 修正了 `TokenManager` 获取 Token 时的模型参数传递偏移，确保账号匹配逻辑与原始请求模型（如 `gpt-4`）严格一致，而非使用内部映射后的模型名。
+            -   **影响范围**: 解决了所有使用 OpenAI 协议调用时的静默失败与 404 故障。
+        -   **[协议增强] 补全 OpenAI Legacy 接口 Token 统计与响应头**:
+            -   **响应头注入**: 重构了 `/v1/responses` 和 `/v1/completions` 的返回逻辑，确保所有路径均注入 `X-Mapped-Model` 和 `X-Account-Email`。
+            -   **消耗统计**: 补全了 Legacy 接口响应体中的 `usage` 字段，解决了流量日志中无法显示 Token 消耗的问题。
+        -   **[系统一致性] 统一 requestId 前缀**:
+            -   **修复内容**: 将 OpenAI 路径下的 `requestId` 前缀由 `openai-` 统一为 `agent-`，使其与 Claude 路径协议特征保持高度一致，提升上游兼容性。
     *   **v3.3.45 (2026-01-19)**:
         - **[核心功能] 彻底解决 Claude/Gemini SSE 中断与 0-token 响应问题 (Issue #859)**:
             - **增强型预读 (Peek) 逻辑**: 在向客户端发送 200 OK 响应前，代理现在会循环预读并跳过所有心跳包（SSE ping）及空数据块，确认收到有效业务内容后再建立连接。
