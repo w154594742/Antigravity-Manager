@@ -1,5 +1,6 @@
 # Logs
 logs
+.logs
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -11,6 +12,7 @@ node_modules
 dist
 dist-ssr
 *.local
+.vite
 
 # Editor directories and files
 .vscode/*
@@ -32,3 +34,14 @@ src-tauri/.env
 .env
 .env.*
 environment/
+
+# Python virtual environments and test files
+.venv*/
+venv/
+# *.py
+__pycache__/
+*.pyc
+
+# Reference projects (for development only)
+CLIProxyAPI/
+DOCKER_DEPLOYMENT.md

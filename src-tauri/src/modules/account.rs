@@ -2,9 +2,15 @@ use std::fs;
 use std::path::PathBuf;
 use serde_json;
 use uuid::Uuid;
+use serde::Serialize;
 
-use crate::models::{Account, AccountIndex, AccountSummary, TokenData, QuotaData};
+use crate::models::{Account, AccountIndex, AccountSummary, TokenData, QuotaData, DeviceProfile, DeviceProfileVersion,};
 use crate::modules;
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
+
+/// Global account write lock to prevent corruption during concurrent operations
+static ACCOUNT_INDEX_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 // ... existing constants ...
 const DATA_DIR: &str = ".antigravity_tools";
@@ -12,129 +18,145 @@ const ACCOUNTS_INDEX: &str = "accounts.json";
 const ACCOUNTS_DIR: &str = "accounts";
 
 // ... existing functions get_data_dir, get_accounts_dir, load_account_index, save_account_index ...
-/// 获取数据目录路径
+/// Get data directory path
 pub fn get_data_dir() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("无法获取用户主目录")?;
+    let home = dirs::home_dir().ok_or("failed_to_get_home_dir")?;
     let data_dir = home.join(DATA_DIR);
     
-    // 确保目录存在
+    // Ensure directory exists
     if !data_dir.exists() {
         fs::create_dir_all(&data_dir)
-            .map_err(|e| format!("创建数据目录失败: {}", e))?;
+            .map_err(|e| format!("failed_to_create_data_dir: {}", e))?;
     }
     
     Ok(data_dir)
 }
 
-/// 获取账号目录路径
+/// Get accounts directory path
 pub fn get_accounts_dir() -> Result<PathBuf, String> {
     let data_dir = get_data_dir()?;
     let accounts_dir = data_dir.join(ACCOUNTS_DIR);
     
     if !accounts_dir.exists() {
         fs::create_dir_all(&accounts_dir)
-            .map_err(|e| format!("创建账号目录失败: {}", e))?;
+            .map_err(|e| format!("failed_to_create_accounts_dir: {}", e))?;
     }
     
     Ok(accounts_dir)
 }
 
-/// 加载账号索引
+/// Load account index
 pub fn load_account_index() -> Result<AccountIndex, String> {
     let data_dir = get_data_dir()?;
     let index_path = data_dir.join(ACCOUNTS_INDEX);
-    // modules::logger::log_info(&format!("正在加载账号索引: {:?}", index_path)); // Optional: reduce noise
     
     if !index_path.exists() {
-        crate::modules::logger::log_warn("账号索引文件不存在");
+        crate::modules::logger::log_warn("Account index file not found");
         return Ok(AccountIndex::new());
     }
     
     let content = fs::read_to_string(&index_path)
-        .map_err(|e| format!("读取账号索引失败: {}", e))?;
+        .map_err(|e| format!("failed_to_read_account_index: {}", e))?;
+    
+    // If file content is empty, treat as new index
+    if content.trim().is_empty() {
+        crate::modules::logger::log_warn("Account index is empty, initializing new index");
+        return Ok(AccountIndex::new());
+    }
     
     let index: AccountIndex = serde_json::from_str(&content)
-        .map_err(|e| format!("解析账号索引失败: {}", e))?;
+        .map_err(|e| format!("failed_to_parse_account_index: {}", e))?;
         
-    crate::modules::logger::log_info(&format!("成功加载索引，包含 {} 个账号", index.accounts.len()));
+    crate::modules::logger::log_info(&format!("Successfully loaded index with {} accounts", index.accounts.len()));
     Ok(index)
 }
 
-/// 保存账号索引
+/// Save account index (atomic write)
 pub fn save_account_index(index: &AccountIndex) -> Result<(), String> {
     let data_dir = get_data_dir()?;
     let index_path = data_dir.join(ACCOUNTS_INDEX);
+    let temp_path = data_dir.join(format!("{}.tmp", ACCOUNTS_INDEX));
     
     let content = serde_json::to_string_pretty(index)
-        .map_err(|e| format!("序列化账号索引失败: {}", e))?;
+        .map_err(|e| format!("failed_to_serialize_account_index: {}", e))?;
     
-    fs::write(&index_path, content)
-        .map_err(|e| format!("保存账号索引失败: {}", e))
+    // Write to temporary file
+    fs::write(&temp_path, content)
+        .map_err(|e| format!("failed_to_write_temp_index_file: {}", e))?;
+        
+    // Atomic rename
+    fs::rename(temp_path, index_path)
+        .map_err(|e| format!("failed_to_replace_index_file: {}", e))
 }
 
-/// 加载账号数据
+/// Load account data
 pub fn load_account(account_id: &str) -> Result<Account, String> {
     let accounts_dir = get_accounts_dir()?;
     let account_path = accounts_dir.join(format!("{}.json", account_id));
     
     if !account_path.exists() {
-        return Err(format!("账号不存在: {}", account_id));
+        return Err(format!("Account not found: {}", account_id));
     }
     
     let content = fs::read_to_string(&account_path)
-        .map_err(|e| format!("读取账号数据失败: {}", e))?;
+        .map_err(|e| format!("failed_to_read_account_data: {}", e))?;
     
     serde_json::from_str(&content)
-        .map_err(|e| format!("解析账号数据失败: {}", e))
+        .map_err(|e| format!("failed_to_parse_account_data: {}", e))
 }
 
-/// 保存账号数据
+/// Save account data
 pub fn save_account(account: &Account) -> Result<(), String> {
     let accounts_dir = get_accounts_dir()?;
     let account_path = accounts_dir.join(format!("{}.json", account.id));
     
     let content = serde_json::to_string_pretty(account)
-        .map_err(|e| format!("序列化账号数据失败: {}", e))?;
+        .map_err(|e| format!("failed_to_serialize_account_data: {}", e))?;
     
     fs::write(&account_path, content)
-        .map_err(|e| format!("保存账号数据失败: {}", e))
+        .map_err(|e| format!("failed_to_save_account_data: {}", e))
 }
 
-/// 列出所有账号
+/// List all accounts
 pub fn list_accounts() -> Result<Vec<Account>, String> {
-    crate::modules::logger::log_info("已开始列出账号...");
-    let index = load_account_index()?;
+    crate::modules::logger::log_info("Listing accounts...");
+    let mut index = load_account_index()?;
     let mut accounts = Vec::new();
     
     for summary in &index.accounts {
         match load_account(&summary.id) {
             Ok(account) => accounts.push(account),
-            Err(e) => crate::modules::logger::log_error(&format!("加载账号 {} 失败: {}", summary.id, e)),
+            Err(e) => {
+                crate::modules::logger::log_error(&format!("Failed to load account {}: {}", summary.id, e));
+                // [FIX #929] Removed auto-repair logic. 
+                // We no longer silently delete account IDs from the index if the file is missing.
+                // This prevents account loss during version upgrades or temporary FS issues.
+            },
         }
     }
     
-    // modules::logger::log_info(&format!("共找到 {} 个有效账号", accounts.len()));
     Ok(accounts)
 }
 
-/// 添加账号
+/// Add account
 pub fn add_account(email: String, name: Option<String>, token: TokenData) -> Result<Account, String> {
+    let _lock = ACCOUNT_INDEX_LOCK.lock().map_err(|e| format!("failed_to_acquire_lock: {}", e))?;
     let mut index = load_account_index()?;
     
-    // 检查是否已存在
+    // Check if account already exists
     if index.accounts.iter().any(|s| s.email == email) {
-        return Err(format!("账号已存在: {}", email));
+        return Err(format!("Account already exists: {}", email));
     }
     
-    // 创建新账号
+    // Create new account
     let account_id = Uuid::new_v4().to_string();
     let mut account = Account::new(account_id.clone(), email.clone(), token);
     account.name = name.clone();
     
-    // 保存账号数据
+    // Save account data
     save_account(&account)?;
     
-    // 更新索引
+    // Update index
     index.accounts.push(AccountSummary {
         id: account_id.clone(),
         email: email.clone(),
@@ -143,7 +165,7 @@ pub fn add_account(email: String, name: Option<String>, token: TokenData) -> Res
         last_used: account.last_used,
     });
     
-    // 如果是第一个账号，设为当前账号
+    // If first account, set as current
     if index.current_account_id.is_none() {
         index.current_account_id = Some(account_id);
     }
@@ -153,25 +175,38 @@ pub fn add_account(email: String, name: Option<String>, token: TokenData) -> Res
     Ok(account)
 }
 
-/// 添加或更新账号
+/// Add or update account
 pub fn upsert_account(email: String, name: Option<String>, token: TokenData) -> Result<Account, String> {
+    let _lock = ACCOUNT_INDEX_LOCK.lock().map_err(|e| format!("failed_to_acquire_lock: {}", e))?;
     let mut index = load_account_index()?;
     
-    // 先找到账号 ID（如果存在）
+    // Find account ID if exists
     let existing_account_id = index.accounts.iter()
         .find(|s| s.email == email)
         .map(|s| s.id.clone());
     
     if let Some(account_id) = existing_account_id {
-        // 更新现有账号
+        // Update existing account
         match load_account(&account_id) {
             Ok(mut account) => {
+                let old_access_token = account.token.access_token.clone();
+                let old_refresh_token = account.token.refresh_token.clone();
                 account.token = token;
                 account.name = name.clone();
+                // If an account was previously disabled (e.g. invalid_grant), any explicit token upsert
+                // should re-enable it (user manually updated credentials in the UI).
+                if account.disabled
+                    && (account.token.refresh_token != old_refresh_token
+                        || account.token.access_token != old_access_token)
+                {
+                    account.disabled = false;
+                    account.disabled_reason = None;
+                    account.disabled_at = None;
+                }
                 account.update_last_used();
                 save_account(&account)?;
                 
-                // 同步更新索引中的 name
+                // Sync name in index
                 if let Some(idx_summary) = index.accounts.iter_mut().find(|s| s.id == account_id) {
                     idx_summary.name = name;
                     save_account_index(&index)?;
@@ -181,12 +216,12 @@ pub fn upsert_account(email: String, name: Option<String>, token: TokenData) -> 
             },
             Err(e) => {
                 crate::modules::logger::log_warn(&format!("Account {} file missing ({}), recreating...", account_id, e));
-                // 索引存在但文件丢失，重新创建
+                // Index exists but file is missing, recreating
                 let mut account = Account::new(account_id.clone(), email.clone(), token);
                 account.name = name.clone();
                 save_account(&account)?;
                 
-                // 同步更新索引中的 name
+                // Sync name in index
                 if let Some(idx_summary) = index.accounts.iter_mut().find(|s| s.id == account_id) {
                     idx_summary.name = name;
                     save_account_index(&index)?;
@@ -197,117 +232,440 @@ pub fn upsert_account(email: String, name: Option<String>, token: TokenData) -> 
         }
     }
     
-    // 不存在则添加
+    // Add if not exists
+    // Note: add_account will attempt to acquire lock, which would deadlock here.
+    // Use an internal version or release lock.
+    
+    // Release lock, let add_account handle it
+    drop(_lock);
     add_account(email, name, token)
 }
 
-/// 删除账号
+/// Delete account
 pub fn delete_account(account_id: &str) -> Result<(), String> {
+    let _lock = ACCOUNT_INDEX_LOCK.lock().map_err(|e| format!("failed_to_acquire_lock: {}", e))?;
     let mut index = load_account_index()?;
     
-    // 从索引中移除
+    // Remove from index
     let original_len = index.accounts.len();
     index.accounts.retain(|s| s.id != account_id);
     
     if index.accounts.len() == original_len {
-        return Err(format!("找不到账号 ID: {}", account_id));
+        return Err(format!("Account ID not found: {}", account_id));
     }
     
-    // 如果是当前账号，清除当前账号
+    // Clear current account if it's being deleted
     if index.current_account_id.as_deref() == Some(account_id) {
         index.current_account_id = index.accounts.first().map(|s| s.id.clone());
     }
     
     save_account_index(&index)?;
     
-    // 删除账号文件
+    // Delete account file
     let accounts_dir = get_accounts_dir()?;
     let account_path = accounts_dir.join(format!("{}.json", account_id));
     
     if account_path.exists() {
         fs::remove_file(&account_path)
-            .map_err(|e| format!("删除账号文件失败: {}", e))?;
+            .map_err(|e| format!("failed_to_delete_account_file: {}", e))?;
     }
     
     Ok(())
 }
 
-/// 切换当前账号
-pub async fn switch_account(account_id: &str) -> Result<(), String> {
-    use crate::modules::{oauth, process, db};
-    
+/// Batch delete accounts (atomic index operation)
+pub fn delete_accounts(account_ids: &[String]) -> Result<(), String> {
+    let _lock = ACCOUNT_INDEX_LOCK.lock().map_err(|e| format!("failed_to_acquire_lock: {}", e))?;
     let mut index = load_account_index()?;
     
-    // 1. 验证账号存在
+    let accounts_dir = get_accounts_dir()?;
+    
+    for account_id in account_ids {
+        // Remove from index
+        index.accounts.retain(|s| &s.id != account_id);
+        
+        // Clear current account if it's being deleted
+        if index.current_account_id.as_deref() == Some(account_id) {
+            index.current_account_id = None;
+        }
+        
+        // Delete account file
+        let account_path = accounts_dir.join(format!("{}.json", account_id));
+        if account_path.exists() {
+            let _ = fs::remove_file(&account_path);
+        }
+    }
+    
+    // If current account is empty, use first one as default
+    if index.current_account_id.is_none() {
+        index.current_account_id = index.accounts.first().map(|s| s.id.clone());
+    }
+    
+    save_account_index(&index)
+}
+
+/// Reorder account list
+/// Update account order in index file based on provided IDs
+pub fn reorder_accounts(account_ids: &[String]) -> Result<(), String> {
+    let _lock = ACCOUNT_INDEX_LOCK.lock().map_err(|e| format!("failed_to_acquire_lock: {}", e))?;
+    let mut index = load_account_index()?;
+    
+    // Create a map of account ID to summary
+    let id_to_summary: std::collections::HashMap<_, _> = index.accounts
+        .iter()
+        .map(|s| (s.id.clone(), s.clone()))
+        .collect();
+    
+    // Rebuild account list with new order
+    let mut new_accounts = Vec::new();
+    for id in account_ids {
+        if let Some(summary) = id_to_summary.get(id) {
+            new_accounts.push(summary.clone());
+        }
+    }
+    
+    // Add accounts missing from new order to the end
+    for summary in &index.accounts {
+        if !account_ids.contains(&summary.id) {
+            new_accounts.push(summary.clone());
+        }
+    }
+    
+    index.accounts = new_accounts;
+    
+    crate::modules::logger::log_info(&format!("Account order updated, {} accounts total", index.accounts.len()));
+    
+    save_account_index(&index)
+}
+
+/// Switch current account
+pub async fn switch_account(account_id: &str) -> Result<(), String> {
+    use crate::modules::{oauth, process, db, device};
+    
+    let index = {
+        let _lock = ACCOUNT_INDEX_LOCK.lock().map_err(|e| format!("failed_to_acquire_lock: {}", e))?;
+        load_account_index()?
+    };
+    
+    // 1. Verify account exists
     if !index.accounts.iter().any(|s| s.id == account_id) {
-        return Err(format!("账号不存在: {}", account_id));
+        return Err(format!("Account not found: {}", account_id));
     }
     
     let mut account = load_account(account_id)?;
-    crate::modules::logger::log_info(&format!("正在切换到账号: {} (ID: {})", account.email, account.id));
+    crate::modules::logger::log_info(&format!("Switching to account: {} (ID: {})", account.email, account.id));
     
-    // 2. 确保 Token 有效（自动刷新）
+    // 2. Ensure Token is valid (auto-refresh)
     let fresh_token = oauth::ensure_fresh_token(&account.token).await
-        .map_err(|e| format!("Token 刷新失败: {}", e))?;
+        .map_err(|e| format!("Token refresh failed: {}", e))?;
         
-    // 如果 Token 更新了，保存回账号文件
+    // If Token updated, save back to account file
     if fresh_token.access_token != account.token.access_token {
         account.token = fresh_token.clone();
         save_account(&account)?;
     }
     
-    // 3. 关闭 Antigravity (增加超时时间到 20 秒)
+    // 3. Get storage path while process is potentially running (to capture --user-data-dir)
+    let storage_path = device::get_storage_path()?;
+
+    // 4. Close Antigravity (increase timeout to 20s)
     if process::is_antigravity_running() {
         process::close_antigravity(20)?;
     }
-    
-    // 4. 获取数据库路径并备份
+
+    // 5. Write device profile (generate/bind if missing), only update storage on switch
+    let profile_to_apply = {
+        if let Some(p) = account.device_profile.clone() {
+            p
+        } else {
+            // [FIX] If no bound profile, generate and bind one for isolation
+            // This ensures each account gets a unique fingerprint upon first switch
+            crate::modules::logger::log_info(&format!("Account {} has no bound fingerprint, generating new one for isolation...", account.email));
+            let new_profile = device::generate_profile();
+            // Bind to account and save
+            apply_profile_to_account(&mut account, new_profile.clone(), Some("auto_generated".to_string()), true)?;
+            new_profile
+        }
+    };
+    crate::modules::logger::log_info(&format!(
+        "Writing device profile to storage.json: machineId={}, macMachineId={}, devDeviceId={}, sqmId={}",
+        profile_to_apply.machine_id,
+        profile_to_apply.mac_machine_id,
+        profile_to_apply.dev_device_id,
+        profile_to_apply.sqm_id
+    ));
+    device::write_profile(&storage_path, &profile_to_apply)?;
+
+    // 5. Get database path and backup
     let db_path = db::get_db_path()?;
     if db_path.exists() {
         let backup_path = db_path.with_extension("vscdb.backup");
         fs::copy(&db_path, &backup_path)
-            .map_err(|e| format!("备份数据库失败: {}", e))?;
+            .map_err(|e| format!("failed_to_backup_database: {}", e))?;
     } else {
-        println!("数据库不存在，跳过备份");
+        crate::modules::logger::log_info("Database does not exist, skipping backup");
     }
-    
-    // 5. 注入 Token
-    crate::modules::logger::log_info("正在注入 Token 到数据库...");
+
+    // 6. Inject Token
+    crate::modules::logger::log_info("Injecting Token into database...");
     db::inject_token(
         &db_path,
         &account.token.access_token,
         &account.token.refresh_token,
-        account.token.expiry_timestamp
+        account.token.expiry_timestamp,
     )?;
-    
-    // 6. 更新工具内部状态
-    index.current_account_id = Some(account_id.to_string());
-    save_account_index(&index)?;
+
+    // 7. Update tool internal state
+    {
+        let _lock = ACCOUNT_INDEX_LOCK.lock().map_err(|e| format!("failed_to_acquire_lock: {}", e))?;
+        let mut index = load_account_index()?;
+        index.current_account_id = Some(account_id.to_string());
+        save_account_index(&index)?;
+    }
     
     account.update_last_used();
     save_account(&account)?;
-    
-    // 7. 重启 Antigravity
+
+    // 8. Restart Antigravity
     process::start_antigravity()?;
-    crate::modules::logger::log_info(&format!("账号切换完成: {}", account.email));
-    
+    crate::modules::logger::log_info(&format!("Account switch completed: {}", account.email));
+
     Ok(())
 }
 
-/// 获取当前账号 ID
+/// Get device profile info: current storage.json + account bound profile
+#[derive(Debug, Serialize)]
+pub struct DeviceProfiles {
+    pub current_storage: Option<DeviceProfile>,
+    pub bound_profile: Option<DeviceProfile>,
+    pub history: Vec<DeviceProfileVersion>,
+    pub baseline: Option<DeviceProfile>,
+}
+
+pub fn get_device_profiles(account_id: &str) -> Result<DeviceProfiles, String> {
+    let storage_path = crate::modules::device::get_storage_path()?;
+    let current = crate::modules::device::read_profile(&storage_path).ok();
+    let account = load_account(account_id)?;
+    Ok(DeviceProfiles {
+        current_storage: current,
+        bound_profile: account.device_profile.clone(),
+        history: account.device_history.clone(),
+        baseline: crate::modules::device::load_global_original(),
+    })
+}
+
+/// Bind device profile and write to storage.json immediately
+pub fn bind_device_profile(account_id: &str, mode: &str) -> Result<DeviceProfile, String> {
+    use crate::modules::device;
+
+    let profile = match mode {
+        "capture" => device::read_profile(&device::get_storage_path()?)?,
+        "generate" => device::generate_profile(),
+        _ => return Err("mode must be 'capture' or 'generate'".to_string()),
+    };
+
+    let mut account = load_account(account_id)?;
+    let _ = device::save_global_original(&profile);
+    apply_profile_to_account(&mut account, profile.clone(), Some(mode.to_string()), true)?;
+
+    Ok(profile)
+}
+
+/// Bind directly with provided profile
+pub fn bind_device_profile_with_profile(account_id: &str, profile: DeviceProfile, label: Option<String>) -> Result<DeviceProfile, String> {
+    let mut account = load_account(account_id)?;
+    let _ = crate::modules::device::save_global_original(&profile);
+    apply_profile_to_account(&mut account, profile.clone(), label, true)?;
+
+    Ok(profile)
+}
+
+fn apply_profile_to_account(account: &mut Account, profile: DeviceProfile, label: Option<String>, add_history: bool) -> Result<(), String> {
+    account.device_profile = Some(profile.clone());
+    if add_history {
+        // Clear 'current' flag
+        for h in account.device_history.iter_mut() {
+            h.is_current = false;
+        }
+        account.device_history.push(DeviceProfileVersion {
+            id: Uuid::new_v4().to_string(),
+            created_at: chrono::Utc::now().timestamp(),
+            label: label.unwrap_or_else(|| "generated".to_string()),
+            profile: profile.clone(),
+            is_current: true,
+        });
+    }
+    save_account(account)?;
+    Ok(())
+}
+
+/// List available device profile versions for an account (including baseline)
+pub fn list_device_versions(account_id: &str) -> Result<DeviceProfiles, String> {
+    get_device_profiles(account_id)
+}
+
+/// Restore device profile by version ID ("baseline" for global original, "current" for current bound)
+pub fn restore_device_version(account_id: &str, version_id: &str) -> Result<DeviceProfile, String> {
+    let mut account = load_account(account_id)?;
+
+    let target_profile = if version_id == "baseline" {
+        crate::modules::device::load_global_original().ok_or("Global original profile not found")?
+    } else if let Some(v) = account.device_history.iter().find(|v| v.id == version_id) {
+        v.profile.clone()
+    } else if version_id == "current" {
+        account.device_profile.clone().ok_or("No currently bound profile")?
+    } else {
+        return Err("Device profile version not found".to_string());
+    };
+
+    account.device_profile = Some(target_profile.clone());
+    for h in account.device_history.iter_mut() {
+        h.is_current = h.id == version_id;
+    }
+    save_account(&account)?;
+    Ok(target_profile)
+}
+
+/// Delete specific historical device profile (baseline cannot be deleted)
+pub fn delete_device_version(account_id: &str, version_id: &str) -> Result<(), String> {
+    if version_id == "baseline" {
+        return Err("Original profile cannot be deleted".to_string());
+    }
+    let mut account = load_account(account_id)?;
+    if account.device_history.iter().any(|v| v.id == version_id && v.is_current) {
+        return Err("Currently bound profile cannot be deleted".to_string());
+    }
+    let before = account.device_history.len();
+    account.device_history.retain(|v| v.id != version_id);
+    if account.device_history.len() == before {
+        return Err("Historical device profile not found".to_string());
+    }
+    save_account(&account)?;
+    Ok(())
+}
+/// Apply account bound device profile to storage.json
+pub fn apply_device_profile(account_id: &str) -> Result<DeviceProfile, String> {
+    use crate::modules::device;
+    let mut account = load_account(account_id)?;
+    let profile = account
+        .device_profile
+        .clone()
+        .ok_or("Account has no bound device profile")?;
+    let storage_path = device::get_storage_path()?;
+    device::write_profile(&storage_path, &profile)?;
+    account.update_last_used();
+    save_account(&account)?;
+    Ok(profile)
+}
+
+/// Restore earliest storage.json backup (approximate "original" state)
+pub fn restore_original_device() -> Result<String, String> {
+    if let Some(current_id) = get_current_account_id()? {
+        if let Ok(mut account) = load_account(&current_id) {
+            if let Some(original) = crate::modules::device::load_global_original() {
+                account.device_profile = Some(original);
+                for h in account.device_history.iter_mut() {
+                    h.is_current = false;
+                }
+                save_account(&account)?;
+                return Ok("Reset current account bound profile to original (not applied to storage)".to_string());
+            }
+        }
+    }
+    Err("Original profile not found, cannot restore".to_string())
+}
+
+
+/// Get current account ID
 pub fn get_current_account_id() -> Result<Option<String>, String> {
     let index = load_account_index()?;
     Ok(index.current_account_id)
 }
 
-/// 更新账号配额
+/// Get currently active account details
+pub fn get_current_account() -> Result<Option<Account>, String> {
+    if let Some(id) = get_current_account_id()? {
+        Ok(Some(load_account(&id)?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Set current active account ID
+pub fn set_current_account_id(account_id: &str) -> Result<(), String> {
+    let _lock = ACCOUNT_INDEX_LOCK.lock().map_err(|e| format!("failed_to_acquire_lock: {}", e))?;
+    let mut index = load_account_index()?;
+    index.current_account_id = Some(account_id.to_string());
+    save_account_index(&index)
+}
+
+/// Update account quota
 pub fn update_account_quota(account_id: &str, quota: QuotaData) -> Result<(), String> {
     let mut account = load_account(account_id)?;
     account.update_quota(quota);
+
+    // --- Quota protection logic start ---
+    if let Ok(config) = crate::modules::config::load_app_config() {
+        if config.quota_protection.enabled {
+            if let Some(ref q) = account.quota {
+                let threshold = config.quota_protection.threshold_percentage as i32;
+
+
+                for model in &q.models {
+                    // Normalize model name to standard ID
+                    let standard_id = match crate::proxy::common::model_mapping::normalize_to_standard_id(&model.name) {
+                        Some(id) => id,
+                        None => continue, // Skip if not one of the 3 protected models
+                    };
+                    
+                    // Only monitor models selected by user
+                    if !config.quota_protection.monitored_models.contains(&standard_id) {
+                        continue;
+                    }
+                    
+                    if model.percentage <= threshold {
+                        // Trigger model-level protection
+                        if !account.protected_models.contains(&standard_id) {
+                            crate::modules::logger::log_info(&format!(
+                                "[Quota] Triggering model protection: {} ({} [{}] remaining {}% <= threshold {}%)",
+                                account.email, standard_id, model.name, model.percentage, threshold
+                            ));
+                            account.protected_models.insert(standard_id.clone());
+
+                        }
+                    } else {
+                        // Auto-recover single model
+                        if account.protected_models.contains(&standard_id) {
+                            crate::modules::logger::log_info(&format!(
+                                "[Quota] Model protection recovered: {} ({} [{}] quota restored to {}%)",
+                                account.email, standard_id, model.name, model.percentage
+                            ));
+                            account.protected_models.remove(&standard_id);
+
+                        }
+                    }
+                }
+
+                // [Compatibility] Migrate from account-level to model-level protection if previously disabled for quota
+                if account.proxy_disabled && 
+                   account.proxy_disabled_reason.as_ref().map_or(false, |r| r == "quota_protection") {
+                    crate::modules::logger::log_info(&format!(
+                        "[Quota] Migrating account {} from account-level to model-level protection",
+                        account.email
+                    ));
+                    account.proxy_disabled = false;
+                    account.proxy_disabled_reason = None;
+                    account.proxy_disabled_at = None;
+                }
+            }
+        }
+    }
+    // --- Quota protection logic end ---
+
     save_account(&account)
 }
 
-/// 导出所有账号的 refresh_token
+/// Export all accounts' refresh_tokens
 #[allow(dead_code)]
 pub fn export_accounts() -> Result<Vec<(String, String)>, String> {
     let accounts = list_accounts()?;
@@ -320,20 +678,35 @@ pub fn export_accounts() -> Result<Vec<(String, String)>, String> {
     Ok(exports)
 }
 
-/// 带有重试机制的配额查询 (从 commands 移动到 modules 以便共享)
-pub async fn fetch_quota_with_retry(account: &mut Account, factory: &crate::modules::HttpClientFactory) -> crate::error::AppResult<QuotaData> {
+/// Quota query with retry (moved from commands to modules for reuse)
+pub async fn fetch_quota_with_retry(account: &mut Account) -> crate::error::AppResult<QuotaData> {
     use crate::modules::oauth;
     use crate::error::AppError;
     use reqwest::StatusCode;
     
-    // 1. 基于时间的检查 (Time-based check) - 先确保 Token 有效
-    let token = oauth::ensure_fresh_token(&account.token).await.map_err(AppError::OAuth)?;
+    // 1. Time-based check - ensure Token is valid first
+    let token = match oauth::ensure_fresh_token(&account.token).await {
+        Ok(t) => t,
+        Err(e) => {
+            if e.contains("invalid_grant") {
+                modules::logger::log_error(&format!(
+                    "Disabling account {} due to invalid_grant during token refresh (quota check)",
+                    account.email
+                ));
+                account.disabled = true;
+                account.disabled_at = Some(chrono::Utc::now().timestamp());
+                account.disabled_reason = Some(format!("invalid_grant: {}", e));
+                let _ = save_account(account);
+            }
+            return Err(AppError::OAuth(e));
+        }
+    };
     
     if token.access_token != account.token.access_token {
-        modules::logger::log_info(&format!("基于时间的 Token 刷新: {}", account.email));
+        modules::logger::log_info(&format!("Time-based Token refresh: {}", account.email));
         account.token = token.clone();
         
-        // 重新获取用户名 (Token 刷新后顺便获取)
+        // Get display name (incidental to Token refresh)
         let name = if account.name.is_none() || account.name.as_ref().map_or(false, |n| n.trim().is_empty()) {
             match oauth::get_user_info(&token.access_token).await {
                 Ok(user_info) => user_info.get_display_name(),
@@ -347,50 +720,74 @@ pub async fn fetch_quota_with_retry(account: &mut Account, factory: &crate::modu
         upsert_account(account.email.clone(), name, token.clone()).map_err(AppError::Account)?;
     }
 
-    // 0. 补充用户名 (如果 Token 没过期但也没用户名，或者上面没获取到)
+    // 0. Supplement display name (if missing or upper step failed)
     if account.name.is_none() || account.name.as_ref().map_or(false, |n| n.trim().is_empty()) {
-        modules::logger::log_info(&format!("账号 {} 缺少用户名，尝试获取...", account.email));
-        // 使用更新后的 token
+        modules::logger::log_info(&format!("Account {} missing display name, attempting to fetch...", account.email));
+        // Use updated token
         match oauth::get_user_info(&account.token.access_token).await {
             Ok(user_info) => {
                 let display_name = user_info.get_display_name();
-                modules::logger::log_info(&format!("成功获取用户名: {:?}", display_name));
+                modules::logger::log_info(&format!("Successfully fetched display name: {:?}", display_name));
                 account.name = display_name.clone();
-                // 立即保存
+                // Save immediately
                 if let Err(e) = upsert_account(account.email.clone(), display_name, account.token.clone()) {
-                     modules::logger::log_warn(&format!("保存用户名失败: {}", e));
+                     modules::logger::log_warn(&format!("Failed to save display name: {}", e));
                 }
             },
             Err(e) => {
-                 modules::logger::log_warn(&format!("获取用户名失败: {}", e));
+                 modules::logger::log_warn(&format!("Failed to fetch display name: {}", e));
             }
         }
     }
 
-    // 2. 尝试查询
-    let result = modules::fetch_quota(&account.token.access_token, factory).await;
+    // 2. Attempt query
+    let result: crate::error::AppResult<(QuotaData, Option<String>)> = modules::fetch_quota(&account.token.access_token, &account.email).await;
     
-    // 3. 处理 401 错误 (Handle 401)
+    // Capture potentially updated project_id and save
+    if let Ok((ref _q, ref project_id)) = result {
+        if project_id.is_some() && *project_id != account.token.project_id {
+            modules::logger::log_info(&format!("Detected project_id update ({}), saving...", account.email));
+            account.token.project_id = project_id.clone();
+            if let Err(e) = upsert_account(account.email.clone(), account.name.clone(), account.token.clone()) {
+                modules::logger::log_warn(&format!("Failed to sync project_id: {}", e));
+            }
+        }
+    }
+
+    // 3. Handle 401 error
     if let Err(AppError::Network(ref e)) = result {
         if let Some(status) = e.status() {
             if status == StatusCode::UNAUTHORIZED {
                 modules::logger::log_warn(&format!("401 Unauthorized for {}, forcing refresh...", account.email));
                 
-                // 强制刷新
-                let token_res = oauth::refresh_access_token(&account.token.refresh_token)
-                    .await
-                    .map_err(AppError::OAuth)?;
+                // Force refresh
+                let token_res = match oauth::refresh_access_token(&account.token.refresh_token).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        if e.contains("invalid_grant") {
+                            modules::logger::log_error(&format!(
+                                "Disabling account {} due to invalid_grant during forced refresh (quota check)",
+                                account.email
+                            ));
+                            account.disabled = true;
+                            account.disabled_at = Some(chrono::Utc::now().timestamp());
+                            account.disabled_reason = Some(format!("invalid_grant: {}", e));
+                            let _ = save_account(account);
+                        }
+                        return Err(AppError::OAuth(e));
+                    }
+                };
                 
                 let new_token = TokenData::new(
                     token_res.access_token.clone(),
                     account.token.refresh_token.clone(),
                     token_res.expires_in,
                     account.token.email.clone(),
-                    account.token.project_id.clone(), // 保留原有 project_id
-                    None, // 添加 None 作为 session_id
+                    account.token.project_id.clone(), // Keep original project_id
+                    None, // Add None as session_id
                 );
                 
-                // 重新获取用户名
+                // Re-fetch display name
                 let name = if account.name.is_none() || account.name.as_ref().map_or(false, |n| n.trim().is_empty()) {
                     match oauth::get_user_info(&token_res.access_token).await {
                         Ok(user_info) => user_info.get_display_name(),
@@ -404,9 +801,18 @@ pub async fn fetch_quota_with_retry(account: &mut Account, factory: &crate::modu
                 account.name = name.clone();
                 upsert_account(account.email.clone(), name, new_token.clone()).map_err(AppError::Account)?;
                 
-                // 重试查询
-                let retry_result = modules::fetch_quota(&new_token.access_token, factory).await;
+                // Retry query
+                let retry_result: crate::error::AppResult<(QuotaData, Option<String>)> = modules::fetch_quota(&new_token.access_token, &account.email).await;
                 
+                // Also handle project_id saving during retry
+                if let Ok((ref _q, ref project_id)) = retry_result {
+                    if project_id.is_some() && *project_id != account.token.project_id {
+                        modules::logger::log_info(&format!("Detected update of project_id after retry ({}), saving...", account.email));
+                        account.token.project_id = project_id.clone();
+                        let _ = upsert_account(account.email.clone(), account.name.clone(), account.token.clone());
+                    }
+                }
+
                 if let Err(AppError::Network(ref e)) = retry_result {
                     if let Some(s) = e.status() {
                         if s == StatusCode::FORBIDDEN {
@@ -416,11 +822,112 @@ pub async fn fetch_quota_with_retry(account: &mut Account, factory: &crate::modu
                         }
                     }
                 }
-                return retry_result;
+                return retry_result.map(|(q, _)| q);
             }
         }
     }
     
-    // fetch_quota 已经处理了 403 错误,这里直接返回结果
-    result
+    // fetch_quota already handles 403, just return mapping result
+    result.map(|(q, _)| q)
+}
+
+#[derive(Serialize)]
+pub struct RefreshStats {
+    pub total: usize,
+    pub success: usize,
+    pub failed: usize,
+    pub details: Vec<String>,
+}
+
+/// Core logic to batch refresh all account quotas (decoupled from Tauri status)
+pub async fn refresh_all_quotas_logic() -> Result<RefreshStats, String> {
+    use futures::future::join_all;
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+
+    const MAX_CONCURRENT: usize = 5;
+    let start = std::time::Instant::now();
+
+    crate::modules::logger::log_info(&format!(
+        "Starting batch refresh of all account quotas (Concurrent mode, max: {})",
+        MAX_CONCURRENT
+    ));
+    let accounts = list_accounts()?;
+
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT));
+
+    let tasks: Vec<_> = accounts
+        .into_iter()
+        .filter(|account| {
+            if account.disabled {
+                crate::modules::logger::log_info(&format!("  - Skipping {} (Disabled)", account.email));
+                return false;
+            }
+            if let Some(ref q) = account.quota {
+                if q.is_forbidden {
+                    crate::modules::logger::log_info(&format!("  - Skipping {} (Forbidden)", account.email));
+                    return false;
+                }
+            }
+            true
+        })
+        .map(|mut account| {
+            let email = account.email.clone();
+            let account_id = account.id.clone();
+            let permit = semaphore.clone();
+            async move {
+                let _guard = permit.acquire().await.unwrap();
+                crate::modules::logger::log_info(&format!("  - Processing {}", email));
+                match fetch_quota_with_retry(&mut account).await {
+                    Ok(quota) => {
+                        if let Err(e) = update_account_quota(&account_id, quota) {
+                            let msg = format!("Account {}: Save quota failed - {}", email, e);
+                            crate::modules::logger::log_error(&msg);
+                            Err(msg)
+                        } else {
+                            crate::modules::logger::log_info(&format!("    ✅ {} Success", email));
+                            Ok(())
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!("Account {}: Fetch quota failed - {}", email, e);
+                        crate::modules::logger::log_error(&msg);
+                        Err(msg)
+                    }
+                }
+            }
+        })
+        .collect();
+
+    let total = tasks.len();
+    let results = join_all(tasks).await;
+
+    let mut success = 0;
+    let mut failed = 0;
+    let mut details = Vec::new();
+
+    for result in results {
+        match result {
+            Ok(()) => success += 1,
+            Err(msg) => {
+                failed += 1;
+                details.push(msg);
+            }
+        }
+    }
+
+    let elapsed = start.elapsed();
+    crate::modules::logger::log_info(&format!(
+        "Batch refresh completed: {} success, {} failed, took: {}ms",
+        success,
+        failed,
+        elapsed.as_millis()
+    ));
+
+    Ok(RefreshStats {
+        total,
+        success,
+        failed,
+        details,
+    })
 }

@@ -14,6 +14,10 @@
     "opener:default",
     "dialog:default",
     "fs:default",
-    "core:tray:default"
+    "core:tray:default",
+    "core:event:default",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled"
   ]
 }

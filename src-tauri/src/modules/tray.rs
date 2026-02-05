@@ -7,11 +7,11 @@ use tauri::{
 use crate::modules;
 
 pub fn create_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
-    // 1. 加载配置获取语言设置
+    // 1. Load config to get language settings
     let config = modules::load_app_config().unwrap_or_default();
     let texts = modules::i18n::get_tray_texts(&config.language);
     
-    // 2. 加载图标（macOS 使用 Template Image）
+    // 2. Load icon (macOS uses Template Image)
     let icon_bytes = include_bytes!("../../icons/tray-icon.png");
     let img = image::load_from_memory(icon_bytes)
         .map_err(|e| tauri::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?
@@ -19,18 +19,18 @@ pub fn create_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     let (width, height) = img.dimensions();
     let icon = Image::new_owned(img.into_raw(), width, height);
 
-    // 3. 定义菜单项（使用翻译文本）
-    // 状态区
+    // 3. Define menu items (using translated texts)
+    // Status area
     let loading_text = format!("{}: ...", texts.current);
     let quota_text = format!("{}: --", texts.quota);
     let info_user = MenuItem::with_id(app, "info_user", &loading_text, false, None::<&str>)?;
     let info_quota = MenuItem::with_id(app, "info_quota", &quota_text, false, None::<&str>)?;
 
-    // 快捷操作区
+    // Quick actions area
     let switch_next = MenuItem::with_id(app, "switch_next", &texts.switch_next, true, None::<&str>)?;
     let refresh_curr = MenuItem::with_id(app, "refresh_curr", &texts.refresh_current, true, None::<&str>)?;
     
-    // 系统功能
+    // System functions
     let show_i = MenuItem::with_id(app, "show", &texts.show_window, true, None::<&str>)?;
     let quit_i = MenuItem::with_id(app, "quit", &texts.quit, true, None::<&str>)?;
     
@@ -38,7 +38,7 @@ pub fn create_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     let sep2 = PredefinedMenuItem::separator(app)?;
     let sep3 = PredefinedMenuItem::separator(app)?;
 
-    // 4. 构建菜单
+    // 4. Build menu
     let menu = Menu::with_items(app, &[
         &info_user,
         &info_quota,
@@ -51,7 +51,7 @@ pub fn create_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
         &quit_i,
     ])?;
 
-    // 4. 构建托盘
+    // 5. Build tray icon
     let _ = TrayIconBuilder::with_id("main")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -71,28 +71,25 @@ pub fn create_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
                     app.exit(0);
                 }
                 "refresh_curr" => {
-                    // 异步执行刷新
+                    // Execute refresh asynchronously
                     tauri::async_runtime::spawn(async move {
                         if let Ok(Some(account_id)) = modules::get_current_account_id() {
-                             // 通知前端开始
+                             // Notify frontend to start
                              let _ = app_handle.emit("tray://refresh-current", ());
-
-                             // 获取 HTTP 客户端工厂
-                             let factory = app_handle.state::<crate::modules::HttpClientFactory>();
-
-                             // 执行刷新逻辑
+                             
+                             // Execute refresh logic
                              if let Ok(mut account) = modules::load_account(&account_id) {
-                                 // 使用 modules::account 中的共享逻辑
-                                 match modules::account::fetch_quota_with_retry(&mut account, &factory).await {
+                                 // Use shared logic from modules::account
+                                 match modules::account::fetch_quota_with_retry(&mut account).await {
                                      Ok(quota) => {
-                                         // 保存
+                                         // Save
                                          let _ = modules::update_account_quota(&account.id, quota);
-                                         // 更新托盘展示
+                                         // Update tray display
                                          update_tray_menus(&app_handle);
                                      },
                                      Err(e) => {
-                                         // 错误处理，可能只记录日志
-                                          modules::logger::log_error(&format!("托盘刷新失败: {}", e));
+                                         // Error handling, log only
+                                          modules::logger::log_error(&format!("Tray refresh failed: {}", e));
                                      }
                                  }
                              }
@@ -101,7 +98,7 @@ pub fn create_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
                 }
                 "switch_next" => {
                     tauri::async_runtime::spawn(async move {
-                         // 1. 获取所有账号
+                         // 1. Get all accounts
                          if let Ok(accounts) = modules::list_accounts() {
                              if accounts.is_empty() { return; }
                              
@@ -114,11 +111,11 @@ pub fn create_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
                                  &accounts[0]
                              };
                              
-                             // 2. 切换
+                             // 2. Switch
                              if let Ok(_) = modules::switch_account(&next_account.id).await {
-                                 // 3. 通知前端
+                                 // 3. Notify frontend
                                  let _ = app_handle.emit("tray://account-switched", next_account.id.clone());
-                                 // 4. 更新托盘
+                                 // 4. Update tray
                                  update_tray_menus(&app_handle);
                              }
                          }
@@ -144,31 +141,31 @@ pub fn create_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
         })
         .build(app)?;
 
-    // 初始化时更新一次状态
+    // Update status once on initialization
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         update_tray_menus(&handle);
     });
 
-    // 监听配置变更事件
+    // Listen for config update events
     let handle = app.clone();
     app.listen("config://updated", move |_event| {
-        modules::logger::log_info("配置已更新，刷新托盘菜单");
+        modules::logger::log_info("Configuration updated, refreshing tray menu");
         update_tray_menus(&handle);
     });
 
     Ok(())
 }
 
-/// 更新托盘菜单的辅助函数
+/// Helper function to update tray menu
 pub fn update_tray_menus<R: Runtime>(app: &tauri::AppHandle<R>) {
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
-         // 读取配置获取语言
+         // Read config to get language
          let config = modules::load_app_config().unwrap_or_default();
          let texts = modules::i18n::get_tray_texts(&config.language);
          
-         // 获取当前账号信息
+         // Get current account info
          let current = modules::get_current_account_id().unwrap_or(None);
          
          let mut menu_lines = Vec::new();
@@ -182,12 +179,12 @@ pub fn update_tray_menus<R: Runtime>(app: &tauri::AppHandle<R>) {
                      if q.is_forbidden {
                          menu_lines.push(format!("🚫 {}", texts.forbidden));
                      } else {
-                         // 提取 3 个指定模型
+                         // Extract the 3 specified models
                          let mut gemini_high = 0;
                          let mut gemini_image = 0;
                          let mut claude = 0;
                          
-                         // 使用严格匹配，与前端一致
+                         // Use strict matching, consistent with frontend
                          for m in q.models {
                              let name = m.name.to_lowercase();
                              if name == "gemini-3-pro-high" { gemini_high = m.percentage; }
@@ -210,10 +207,10 @@ pub fn update_tray_menus<R: Runtime>(app: &tauri::AppHandle<R>) {
              menu_lines.push(texts.unknown_quota.clone());
          };
 
-         // 重新构建菜单项
+         // Rebuild menu items
          let info_user = MenuItem::with_id(&app_clone, "info_user", &user_text, false, None::<&str>);
          
-         // 动态创建额度项
+         // Dynamically create quota items
          let mut quota_items = Vec::new();
          for (i, line) in menu_lines.iter().enumerate() {
              let item = MenuItem::with_id(&app_clone, format!("info_quota_{}", i), line, false, None::<&str>);
@@ -234,7 +231,7 @@ pub fn update_tray_menus<R: Runtime>(app: &tauri::AppHandle<R>) {
              let sep3 = PredefinedMenuItem::separator(&app_clone).ok();
              
              let mut items: Vec<&dyn tauri::menu::IsMenuItem<R>> = vec![&i_u];
-             // 添加动态的额度项
+             // Add dynamic quota items
              for item in &quota_items {
                  items.push(item);
              }

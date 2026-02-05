@@ -1,8 +1,15 @@
 import { formatDistanceToNow } from 'date-fns';
-import { zhCN, enUS } from 'date-fns/locale';
+import { zhCN, zhTW, enUS, ja, tr, vi, ptBR } from 'date-fns/locale';
 
 export function formatRelativeTime(timestamp: number, language: string = 'zh-CN'): string {
-    const locale = language === 'zh-CN' ? zhCN : enUS;
+    let locale = enUS;
+    if (language === 'zh-CN' || language === 'zh') locale = zhCN;
+    else if (language === 'zh-TW') locale = zhTW;
+    else if (language === 'ja') locale = ja;
+    else if (language === 'tr') locale = tr;
+    else if (language === 'vi') locale = vi;
+    else if (language === 'pt' || language === 'pt-BR') locale = ptBR;
+
     return formatDistanceToNow(new Date(timestamp * 1000), {
         addSuffix: true,
         locale,
@@ -44,6 +51,21 @@ export function formatTimeRemaining(dateStr: string): string {
     return `${diffHrs}h ${diffMins}m`;
 }
 
+export function getTimeRemainingColor(dateStr: string | undefined): string {
+    if (!dateStr) return 'gray';
+    const targetDate = new Date(dateStr);
+    const now = new Date();
+    const diffMs = targetDate.getTime() - now.getTime();
+
+    if (diffMs <= 0) return 'success'; // 已经过期的也算成功（即将重置或已重置）
+
+    const diffHrs = diffMs / (1000 * 60 * 60);
+
+    if (diffHrs < 1) return 'success';   // < 1h: 绿色 (快重置了)
+    if (diffHrs < 6) return 'warning';   // 1-6h: 琥珀色 (等待中)
+    return 'neutral';                   // > 6h: 灰色 (长等待)
+}
+
 export function formatDate(timestamp: string | number | undefined | null): string | null {
     if (!timestamp) return null;
     const date = typeof timestamp === 'number'
@@ -61,4 +83,18 @@ export function formatDate(timestamp: string | number | undefined | null): strin
         second: '2-digit',
         hour12: false
     });
+}
+
+export function formatCompactNumber(num: number): string {
+    if (num === 0) return '0';
+    if (num < 1000 && num > -1000) return num.toString();
+
+    const units = ['', 'k', 'M', 'G', 'T', 'P'];
+    const absNum = Math.abs(num);
+    const i = Math.floor(Math.log10(absNum) / 3);
+    const value = num / Math.pow(1000, i);
+
+    // Round to 1 decimal place if needed
+    const formatted = value.toFixed(Math.abs(value) < 10 && i > 0 ? 1 : 0);
+    return `${formatted.replace(/\.0$/, '')}${units[i]}`;
 }

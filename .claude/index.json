@@ -1,0 +1,29 @@
+{
+  "project": "Antigravity-Manager",
+  "last_scan": "2026-02-04T11:52:14Z",
+  "modules": [
+    {
+      "name": "root",
+      "path": "./",
+      "type": "project-root",
+      "coverage": 100
+    },
+    {
+      "name": "frontend",
+      "path": "src/",
+      "type": "react-typescript",
+      "entry": "src/main.tsx"
+    },
+    {
+      "name": "backend",
+      "path": "src-tauri/",
+      "type": "rust-tauri",
+      "entry": "src-tauri/src/main.rs"
+    }
+  ],
+  "scan_stats": {
+    "total_files": 120,
+    "scanned_files": 120,
+    "coverage_percent": 100
+  }
+}

@@ -9,9 +9,25 @@ pub mod oauth_server;
 pub mod migration;
 pub mod tray;
 pub mod i18n;
-pub mod http_client;
+pub mod proxy_db;
+pub mod device;
+pub mod update_checker;
+pub mod scheduler;
+pub mod http_api;
+pub mod token_stats;
+pub mod cloudflared;
 
+use crate::models;
+
+// Re-export commonly used functions to the top level of the modules namespace for easy external calling
 pub use account::*;
+#[allow(unused_imports)]
 pub use quota::*;
 pub use config::*;
-pub use http_client::HttpClientFactory;
+#[allow(unused_imports)]
+pub use logger::*;
+// pub use device::*;
+
+pub async fn fetch_quota(access_token: &str, email: &str) -> crate::error::AppResult<(models::QuotaData, Option<String>)> {
+    quota::fetch_quota(access_token, email).await
+}

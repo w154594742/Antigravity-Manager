@@ -1,9 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Plus, Database, Globe, FileClock, Loader2, CheckCircle2, XCircle, Copy } from 'lucide-react';
+import { Plus, Database, Globe, FileClock, Loader2, CheckCircle2, XCircle, Copy, Check } from 'lucide-react';
 import { useAccountStore } from '../../stores/useAccountStore';
 import { useTranslation } from 'react-i18next';
 import { listen } from '@tauri-apps/api/event';
+import { open } from '@tauri-apps/plugin-dialog';
+import { request as invoke } from '../../utils/request';
 
 interface AddAccountDialogProps {
     onAdd: (email: string, refreshToken: string) => Promise<void>;
@@ -17,12 +19,25 @@ function AddAccountDialog({ onAdd }: AddAccountDialogProps) {
     const [activeTab, setActiveTab] = useState<'oauth' | 'token' | 'import'>('oauth');
     const [refreshToken, setRefreshToken] = useState('');
     const [oauthUrl, setOauthUrl] = useState('');
+    const [oauthUrlCopied, setOauthUrlCopied] = useState(false);
 
     // UI State
     const [status, setStatus] = useState<Status>('idle');
     const [message, setMessage] = useState('');
 
-    const { startOAuthLogin, cancelOAuthLogin, importFromDb, importV1Accounts } = useAccountStore();
+    const { startOAuthLogin, completeOAuthLogin, cancelOAuthLogin, importFromDb, importV1Accounts, importFromCustomDb } = useAccountStore();
+
+    const oauthUrlRef = useRef(oauthUrl);
+    const statusRef = useRef(status);
+    const activeTabRef = useRef(activeTab);
+    const isOpenRef = useRef(isOpen);
+
+    useEffect(() => {
+        oauthUrlRef.current = oauthUrl;
+        statusRef.current = status;
+        activeTabRef.current = activeTab;
+        isOpenRef.current = isOpen;
+    }, [oauthUrl, status, activeTab, isOpen]);
 
     // Reset state when dialog opens or tab changes
     useEffect(() => {
@@ -49,17 +64,95 @@ function AddAccountDialog({ onAdd }: AddAccountDialogProps) {
         };
     }, []);
 
+    // Listen for OAuth callback completion (user may open the URL manually without clicking Start)
+    useEffect(() => {
+        let unlisten: (() => void) | undefined;
+
+        const setupListener = async () => {
+            unlisten = await listen('oauth-callback-received', async () => {
+                if (!isOpenRef.current) return;
+                if (activeTabRef.current !== 'oauth') return;
+                if (statusRef.current === 'loading' || statusRef.current === 'success') return;
+                if (!oauthUrlRef.current) return;
+
+                // Auto-complete: exchange code and save account (no browser open)
+                setStatus('loading');
+                setMessage(`${t('accounts.add.tabs.oauth')}...`);
+
+                try {
+                    await completeOAuthLogin();
+                    setStatus('success');
+                    setMessage(`${t('accounts.add.tabs.oauth')} ${t('common.success')}!`);
+                    setTimeout(() => {
+                        setIsOpen(false);
+                        resetState();
+                    }, 1500);
+                } catch (error) {
+                    setStatus('error');
+                    let errorMsg = String(error);
+                    if (errorMsg.includes('Refresh Token') || errorMsg.includes('refresh_token')) {
+                        setMessage(errorMsg);
+                    } else if (errorMsg.includes('Tauri') || errorMsg.toLowerCase().includes('environment') || errorMsg.includes('环境')) {
+                        setMessage(t('common.environment_error', { error: errorMsg }));
+                    } else {
+                        setMessage(`${t('accounts.add.tabs.oauth')} ${t('common.error')}: ${errorMsg}`);
+                    }
+                }
+            });
+        };
+
+        setupListener();
+
+        return () => {
+            if (unlisten) unlisten();
+        };
+    }, [completeOAuthLogin, t]);
+
+    // Pre-generate OAuth URL when dialog opens on OAuth tab (so URL is shown BEFORE "Start OAuth")
+    useEffect(() => {
+        if (!isOpen) return;
+        if (activeTab !== 'oauth') return;
+        if (oauthUrl) return;
+
+        invoke<string>('prepare_oauth_url')
+            .then((url) => {
+                // Set directly (also emitted via event), to avoid any race if event is missed.
+                if (typeof url === 'string' && url.length > 0) setOauthUrl(url);
+            })
+            .catch((e) => {
+                console.error('Failed to prepare OAuth URL:', e);
+            });
+    }, [isOpen, activeTab, oauthUrl]);
+
+    // If user navigates away from OAuth tab, cancel prepared flow to release the port.
+    useEffect(() => {
+        if (!isOpen) return;
+        if (activeTab === 'oauth') return;
+        if (!oauthUrl) return;
+
+        cancelOAuthLogin().catch(() => { });
+        setOauthUrl('');
+        setOauthUrlCopied(false);
+    }, [isOpen, activeTab]);
+
     const resetState = () => {
         setStatus('idle');
         setMessage('');
         setRefreshToken('');
         setOauthUrl('');
+        setOauthUrlCopied(false);
     };
 
-    const handleAction = async (actionName: string, actionFn: () => Promise<any>) => {
+    const handleAction = async (
+        actionName: string,
+        actionFn: () => Promise<any>,
+        options?: { clearOauthUrl?: boolean }
+    ) => {
         setStatus('loading');
         setMessage(`${actionName}...`);
-        setOauthUrl(''); // Clear previous URL
+        if (options?.clearOauthUrl !== false) {
+            setOauthUrl(''); // Clear previous URL
+        }
         try {
             await actionFn();
             setStatus('success');
@@ -79,9 +172,9 @@ function AddAccountDialog({ onAdd }: AddAccountDialogProps) {
             // 如果是 refresh_token 缺失错误,显示完整信息(包含解决方案)
             if (errorMsg.includes('Refresh Token') || errorMsg.includes('refresh_token')) {
                 setMessage(errorMsg);
-            } else if (errorMsg.includes('Tauri') || errorMsg.includes('环境')) {
+            } else if (errorMsg.includes('Tauri') || errorMsg.toLowerCase().includes('environment') || errorMsg.includes('环境')) {
                 // 环境错误
-                setMessage(`环境错误: ${errorMsg}`);
+                setMessage(t('common.environment_error', { error: errorMsg }));
             } else {
                 // 其他错误
                 setMessage(`${actionName} ${t('common.error')}: ${errorMsg}`);
@@ -175,16 +268,22 @@ function AddAccountDialog({ onAdd }: AddAccountDialogProps) {
     };
 
     const handleOAuth = () => {
-        handleAction(t('accounts.add.tabs.oauth'), startOAuthLogin);
+        // Default flow: opens the default browser and completes automatically.
+        // (If user opened the URL manually, completion is also triggered by oauth-callback-received.)
+        handleAction(t('accounts.add.tabs.oauth'), startOAuthLogin, { clearOauthUrl: false });
+    };
+
+    const handleCompleteOAuth = () => {
+        // Manual flow: user already authorized in their preferred browser, just finish the flow.
+        handleAction(t('accounts.add.tabs.oauth'), completeOAuthLogin, { clearOauthUrl: false });
     };
 
     const handleCopyUrl = async () => {
         if (oauthUrl) {
             try {
                 await navigator.clipboard.writeText(oauthUrl);
-                // 临时显示复制成功 (可以复用 status 或 message，但不想打断 loading 状态)
-                // 这里简单弹个 alert 或者使用 toast，或者改变按钮文本
-                // 为了简单起见，我们暂时不改变全局状态，因为 OAuth 正在进行中 (loading)
+                setOauthUrlCopied(true);
+                window.setTimeout(() => setOauthUrlCopied(false), 1500);
             } catch (err) {
                 console.error('Failed to copy: ', err);
             }
@@ -197,6 +296,27 @@ function AddAccountDialog({ onAdd }: AddAccountDialogProps) {
 
     const handleImportV1 = () => {
         handleAction(t('accounts.add.import.btn_v1'), importV1Accounts);
+    };
+
+    const handleImportCustomDb = async () => {
+        try {
+            const selected = await open({
+                multiple: false,
+                filters: [{
+                    name: 'VSCode DB',
+                    extensions: ['vscdb']
+                }, {
+                    name: 'All Files',
+                    extensions: ['*']
+                }]
+            });
+
+            if (selected && typeof selected === 'string') {
+                handleAction(t('accounts.add.import.btn_custom_db') || 'Import Custom DB', () => importFromCustomDb(selected));
+            }
+        } catch (err) {
+            console.error('Failed to open dialog:', err);
+        }
     };
 
     // 状态提示组件
@@ -226,19 +346,28 @@ function AddAccountDialog({ onAdd }: AddAccountDialogProps) {
     return (
         <>
             <button
-                className="px-4 py-2 bg-white dark:bg-base-100 text-gray-700 dark:text-gray-300 text-sm font-medium rounded-lg hover:bg-gray-50 dark:hover:bg-base-200 transition-colors flex items-center gap-2 shadow-sm border border-gray-200/50 dark:border-base-300"
-                onClick={() => setIsOpen(true)}
+                className="px-4 py-2 bg-white dark:bg-base-100 text-gray-700 dark:text-gray-300 text-sm font-medium rounded-lg hover:bg-gray-50 dark:hover:bg-base-200 transition-colors flex items-center gap-2 shadow-sm border border-gray-200/50 dark:border-base-300 relative z-[100]"
+                onClick={() => {
+                    console.log('AddAccountDialog button clicked');
+                    setIsOpen(true);
+                }}
             >
                 <Plus className="w-4 h-4" />
                 {t('accounts.add_account')}
             </button>
 
             {isOpen && createPortal(
-                <dialog className="modal modal-open z-[100]">
+                <div 
+                    className="fixed inset-0 z-[99999] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+                    style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0 }}
+                >
                     {/* Draggable Top Region */}
-                    <div data-tauri-drag-region className="fixed top-0 left-0 right-0 h-8 z-[110]" />
+                    <div data-tauri-drag-region className="fixed top-0 left-0 right-0 h-8 z-[1]" />
 
-                    <div className="modal-box bg-white dark:bg-base-100 text-gray-900 dark:text-base-content">
+                    {/* Click outside to close */}
+                    <div className="absolute inset-0 z-[0]" onClick={() => setIsOpen(false)} />
+
+                    <div className="bg-white dark:bg-base-100 text-gray-900 dark:text-base-content rounded-2xl shadow-2xl w-full max-w-lg p-6 relative z-[10] m-4 max-h-[90vh] overflow-y-auto">
                         <h3 className="font-bold text-lg mb-4">{t('accounts.add.title')}</h3>
 
                         {/* Tab 导航 - 胶囊风格 */}
@@ -300,13 +429,39 @@ function AddAccountDialog({ onAdd }: AddAccountDialogProps) {
                                         </button>
 
                                         {oauthUrl && (
-                                            <button
-                                                className="w-full px-4 py-2 bg-white dark:bg-base-100 text-gray-600 dark:text-gray-400 text-sm font-medium rounded-xl border border-dashed border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-base-200 transition-all flex items-center justify-center gap-2"
-                                                onClick={handleCopyUrl}
-                                            >
-                                                <Copy className="w-3.5 h-3.5" />
-                                                {t('accounts.add.oauth.copy_link')}
-                                            </button>
+                                            <div className="space-y-2">
+                                                <div className="text-[11px] text-gray-500 dark:text-gray-400 text-left">
+                                                    {t('accounts.add.oauth.link_label')}
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    className="w-full px-4 py-2 bg-white dark:bg-base-100 text-gray-600 dark:text-gray-300 text-sm font-medium rounded-xl border border-dashed border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-base-200 transition-all flex items-center gap-2"
+                                                    onClick={handleCopyUrl}
+                                                    title={t('accounts.add.oauth.link_click_to_copy')}
+                                                >
+                                                    {oauthUrlCopied ? (
+                                                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                                    ) : (
+                                                        <Copy className="w-3.5 h-3.5" />
+                                                    )}
+                                                    <code className="text-[11px] font-mono truncate flex-1 text-left">
+                                                        {oauthUrl}
+                                                    </code>
+                                                    <span className="text-[11px] whitespace-nowrap">
+                                                        {oauthUrlCopied ? t('accounts.add.oauth.copied') : t('accounts.add.oauth.copy_link')}
+                                                    </span>
+                                                </button>
+
+                                                <button
+                                                    type="button"
+                                                    className="w-full px-4 py-2 bg-white dark:bg-base-100 text-gray-700 dark:text-gray-300 text-sm font-medium rounded-xl border border-gray-200 dark:border-base-300 hover:bg-gray-50 dark:hover:bg-base-200 transition-all flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed"
+                                                    onClick={handleCompleteOAuth}
+                                                    disabled={status === 'loading' || status === 'success'}
+                                                >
+                                                    <CheckCircle2 className="w-4 h-4" />
+                                                    {t('accounts.add.oauth.btn_finish')}
+                                                </button>
+                                            </div>
                                         )}
                                     </div>
                                 </div>
@@ -345,11 +500,20 @@ function AddAccountDialog({ onAdd }: AddAccountDialogProps) {
                                             {t('accounts.add.import.scheme_a_desc')}
                                         </p>
                                         <button
-                                            className="btn btn-outline w-full border-gray-300 dark:border-base-300 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-base-200 hover:border-gray-400 hover:text-gray-900 dark:hover:text-white"
+                                            className="w-full px-4 py-3 bg-gray-50 dark:bg-base-200 text-gray-700 dark:text-gray-300 font-medium rounded-xl border border-gray-200 dark:border-base-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 hover:border-blue-200 dark:hover:border-blue-800 hover:text-blue-600 dark:hover:text-blue-400 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed mb-2 shadow-sm"
                                             onClick={handleImportDb}
                                             disabled={status === 'loading' || status === 'success'}
                                         >
+                                            <CheckCircle2 className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity" />
                                             {t('accounts.add.import.btn_db')}
+                                        </button>
+                                        <button
+                                            className="w-full px-4 py-3 bg-gray-50 dark:bg-base-200 text-gray-700 dark:text-gray-300 font-medium rounded-xl border border-gray-200 dark:border-base-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 hover:border-indigo-200 dark:hover:border-indigo-800 hover:text-indigo-600 dark:hover:text-indigo-400 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                                            onClick={handleImportCustomDb}
+                                            disabled={status === 'loading' || status === 'success'}
+                                        >
+                                            <Database className="w-4 h-4" />
+                                            {t('accounts.add.import.btn_custom_db') || 'Custom DB (state.vscdb)'}
                                         </button>
                                     </div>
 
@@ -364,10 +528,11 @@ function AddAccountDialog({ onAdd }: AddAccountDialogProps) {
                                             {t('accounts.add.import.scheme_b_desc')}
                                         </p>
                                         <button
-                                            className="btn btn-outline w-full border-gray-300 dark:border-base-300 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-base-200 hover:border-gray-400 hover:text-gray-900 dark:hover:text-white"
+                                            className="w-full px-4 py-3 bg-gray-50 dark:bg-base-200 text-gray-700 dark:text-gray-300 font-medium rounded-xl border border-gray-200 dark:border-base-300 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 hover:border-emerald-200 dark:hover:border-emerald-800 hover:text-emerald-600 dark:hover:text-emerald-400 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
                                             onClick={handleImportV1}
                                             disabled={status === 'loading' || status === 'success'}
                                         >
+                                            <FileClock className="w-4 h-4" />
                                             {t('accounts.add.import.btn_v1')}
                                         </button>
                                     </div>
@@ -400,8 +565,7 @@ function AddAccountDialog({ onAdd }: AddAccountDialogProps) {
                             )}
                         </div>
                     </div>
-                    <div className="modal-backdrop bg-black/40 backdrop-blur-sm fixed inset-0 z-[-1]" onClick={() => setIsOpen(false)}></div>
-                </dialog>,
+                </div>,
                 document.body
             )}
         </>
